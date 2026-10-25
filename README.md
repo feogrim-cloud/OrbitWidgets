@@ -7,9 +7,9 @@ Orbit Widgets displays CPU and GPU load and temperature, memory use, occupied dr
 
 **[Download the latest release](https://github.com/feogrim-cloud/OrbitWidgets/releases/latest)** · [Build from source](docs/BUILD.md) · [Report an issue](https://github.com/feogrim-cloud/OrbitWidgets/issues)
 
-![Dual-ring illustration of CPU, GPU, memory and network widgets](assets/preview.svg)
+[![Horizontal widgets in the neon theme](assets/screenshots/hero-horizontal.png)](assets/screenshots/hero-horizontal.png)
 
-*Design illustration with example values, not a screenshot. The space around the widgets is transparent.*
+*The actual interface rendered with demonstration readings. Neutral backdrops make the transparent widgets visible; they are not an application panel. Click any image to view it at full size.*
 
 ## Download
 
@@ -23,6 +23,20 @@ For **Windows 10 version 2004 or newer and Windows 11, Intel/AMD x64**.
 Keep the `sensors` folder beside the application. No development tools are needed for the ready-made packages. The sensor helper uses .NET Framework 4.7.2 or newer. Orbit Widgets executables are currently unsigned; the separately bundled official PawnIO driver installer is signed by its publisher. Release assets include a SHA-256 checksum manifest.
 
 Windows x86, Windows ARM64 and Linux packages are not provided. There is no automatic updater.
+
+## Interface gallery
+
+**Light theme**
+
+[![Horizontal widgets in the light theme](assets/screenshots/theme-light.png)](assets/screenshots/theme-light.png)
+
+<table>
+  <tr><th>Vertical placement at the right edge</th><th>Metric and appearance settings</th></tr>
+  <tr>
+    <td align="center"><a href="assets/screenshots/vertical.png"><img src="assets/screenshots/vertical.png" height="420" alt="Vertical widgets at the right edge"></a></td>
+    <td align="center"><a href="assets/screenshots/settings.png"><img src="assets/screenshots/settings.png" height="420" alt="Orbit Widgets settings, including elevated startup"></a></td>
+  </tr>
+</table>
 
 ## Features
 
@@ -82,7 +96,7 @@ To update, close Orbit Widgets and install the new version, or replace the compl
 | Sensor fallback | Small C# helper, .NET Framework, LibreHardwareMonitor |
 | Packaging | PowerShell, Inno Setup 7.1, portable ZIP and SHA-256 checksums |
 
-See [build instructions](docs/BUILD.md), [changes](CHANGELOG.md) and [contribution guidance](CONTRIBUTING.md). The main application uses a native desktop rendering stack and does not embed a web browser.
+See [build instructions](docs/BUILD.md), [changes](CHANGELOG.md), [contribution guidance](CONTRIBUTING.md) and the [gallery renderer](docs/GALLERY.md). The main application uses a native desktop rendering stack and does not embed a web browser.
 
 [GitHub Actions](https://github.com/feogrim-cloud/OrbitWidgets/actions) builds and checks Windows x64 packages. Version tags (`v*`) or a manual run with `release_tag` publish the installer and portable package only after the build and package checks succeed. Download `SHA256SUMS.txt` from the same release to verify the assets; the automated checks do not replace hardware sensor and desktop testing.
 

@@ -13,7 +13,7 @@ SOURCE_FILES = (
     'CONTRIBUTING.md', 'build.ps1',
 )
 SOURCE_DIRS = ('.cargo', '.github', 'src', 'sensor-helper', 'build-assets',
-               'installer', 'scripts', 'docs', 'assets')
+               'installer', 'scripts', 'docs', 'assets', 'examples')
 
 
 def public_source_files(root: Path):

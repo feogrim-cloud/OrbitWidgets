@@ -634,6 +634,114 @@ fn heat_color(temp: Option<f32>, normal: Color32) -> Color32 { if temp.is_some_a
 fn gib(bytes: u64) -> f64 { bytes as f64 / 1_073_741_824.0 }
 fn compact(value: f64) -> String { (if value >= 100.0 { format!("{value:.0}") } else if value >= 10.0 { format!("{value:.1}") } else { format!("{value:.2}") }).replace('.', ",") }
 
+/// Renderer-only documentation scenes. This wrapper deliberately bypasses the
+/// application's constructor, collector, native shell and settings persistence.
+#[cfg(feature = "gallery")]
+pub mod gallery {
+    use super::*;
+    use crate::model::DiskMetric;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Scene { HeroHorizontal, ThemeLight, Vertical, Settings }
+
+    impl Scene {
+        pub fn parse(name: &str) -> Option<Self> { match name {
+            "hero-horizontal" | "horizontal-neon" => Some(Self::HeroHorizontal),
+            "theme-light" | "horizontal-light" => Some(Self::ThemeLight),
+            "vertical" => Some(Self::Vertical), "settings" => Some(Self::Settings), _ => None,
+        }}
+
+        pub fn canvas(self) -> [f32; 2] { match self {
+            Self::HeroHorizontal | Self::ThemeLight => [900.0, 200.0],
+            Self::Vertical => [420.0, 800.0], Self::Settings => [520.0, 980.0],
+        }}
+    }
+
+    pub struct GalleryApp { app: WidgetApp, scene: Scene }
+
+    impl GalleryApp {
+        pub fn new(scene: Scene) -> Self {
+            let mut config = Config::default();
+            config.theme = if scene == Scene::ThemeLight { Theme::Light } else { Theme::Neon };
+            config.layout = if scene == Scene::Vertical || scene == Scene::Settings { Layout::Vertical } else { Layout::Horizontal };
+            config.diameter = if scene == Scene::Vertical { 112.0 } else { 128.0 };
+            config.gap = 14.0;
+            config.opacity = 1.0;
+            config.monitor_index = 1;
+            config.anchor = Anchor::MiddleRight;
+            config.margin = 10.0;
+            let gib = 1_073_741_824_u64;
+            let metrics = Metrics {
+                cpu_usage: Some(37.0), cpu_temp: Some(62.0),
+                gpu_usage: Some(54.0), gpu_temp: Some(66.0),
+                gpu_name: "NVIDIA GeForce RTX 3060".into(),
+                ram_used: (12.8 * gib as f64) as u64, ram_total: 32 * gib,
+                disks: vec![DiskMetric { mount: "C:\\".into(), used: 186 * gib, total: 476 * gib },
+                    DiskMetric { mount: "D:\\".into(), used: 742 * gib, total: 1000 * gib }],
+                network_rx_bps: 32.4 * 125_000.0, network_tx_bps: 2.1 * 125_000.0,
+                network_name: "Ethernet".into(), network_interfaces: vec!["Ethernet".into(), "Wi-Fi".into()],
+                temperature_status: "Температура ЦП: MSI Afterburner, общая память".into(),
+                sensor_helper_running: false,
+            };
+            let (_snapshots, rx) = mpsc::channel();
+            let (commands, _command_rx) = mpsc::channel();
+            let mut app = WidgetApp {
+                config, rx, commands, signals: Arc::new(UiSignals::default()), metrics,
+                last_sample: Some(Instant::now()), settings_open: false, save_at: None, save_error: None,
+                last_size: Vec2::ZERO, last_work_area: [0.0; 2], last_pixels_per_point: 0.0,
+                need_anchor: false, applied_locked: None, applied_top: None, applied_theme: None,
+                smoothed: HashMap::new(), startup_status: Some(StartupStatus { enabled: false, elevated: false }),
+                startup_rx: None, startup_error: None, tooltip: TooltipState::default(),
+            };
+            for gauge in app.gauges(Palette::new(app.config.theme)) {
+                app.smoothed.insert(gauge.id, [gauge.outer.unwrap_or(0.0), gauge.inner.unwrap_or(0.0)]);
+            }
+            Self { app, scene }
+        }
+    }
+
+    impl eframe::App for GalleryApp {
+        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            ctx.set_pixels_per_point(1.0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.scene.canvas().into()));
+            ctx.set_visuals(if self.app.config.theme == Theme::Light { egui::Visuals::light() } else { egui::Visuals::dark() });
+            if self.scene == Scene::Settings {
+                self.app.settings_ui(ctx);
+            } else {
+                let palette = Palette::new(self.app.config.theme);
+                let gauges = self.app.gauges(palette);
+                let canvas = self.scene.canvas();
+                let diameter = self.app.config.diameter;
+                let gap = self.app.config.gap;
+                let length = gauges.len() as f32 * diameter + gauges.len().saturating_sub(1) as f32 * gap;
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                    for (index, gauge) in gauges.iter().enumerate() {
+                        let along = index as f32 * (diameter + gap);
+                        let min = if self.scene == Scene::Vertical {
+                            Pos2::new(canvas[0] - diameter - 28.0, (canvas[1] - length) / 2.0 + along)
+                        } else {
+                            Pos2::new((canvas[0] - length) / 2.0 + along, (canvas[1] - diameter) / 2.0)
+                        };
+                        let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), gauge, palette, 1.0 / 60.0);
+                    }
+                });
+            }
+            ctx.request_repaint();
+        }
+
+        fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+            if self.scene == Scene::ThemeLight { [0.90, 0.94, 0.97, 1.0] }
+            else { [0.025, 0.045, 0.08, 1.0] }
+        }
+
+        fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+            // Documentation rendering is non-interactive, including the startup
+            // controls. The example also supplies no-I/O platform/service stubs.
+            raw.events.clear(); raw.dropped_files.clear(); raw.hovered_files.clear(); raw.focused = false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,5 +1,21 @@
 # Orbit Widgets v1.1.2
 
+## Интерфейс / Interface
+
+Настоящий интерфейс с демонстрационными показаниями. The actual interface rendered with demonstration readings. Нейтральная подложка не является панелью приложения. The neutral backdrop is not an application panel.
+
+[![Горизонтально · Horizontal layout](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/hero-horizontal.png)](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/hero-horizontal.png)
+
+[![Светлая тема · Light theme](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/theme-light.png)](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/theme-light.png)
+
+<table>
+  <tr><th>Вертикально · Vertical layout</th><th>Настройки · Settings</th></tr>
+  <tr>
+    <td align="center"><a href="https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/vertical.png"><img src="https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/vertical.png" height="420" alt="Вертикальные виджеты справа · Vertical widgets at the right edge"></a></td>
+    <td align="center"><a href="https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/settings.png"><img src="https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/settings.png" height="420" alt="Настройки · Settings"></a></td>
+  </tr>
+</table>
+
 ## English
 
 Orbit Widgets provides transparent circular performance widgets for Windows x64. The application interface is in Russian.

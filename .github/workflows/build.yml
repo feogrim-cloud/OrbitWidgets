@@ -41,6 +41,8 @@ jobs:
           if ($LASTEXITCODE) { throw 'Rust toolchain selection failed.' }
       - name: Test, compile and stage application
         run: ./build.ps1
+      - name: Check isolated gallery renderer
+        run: cargo check --release --locked --features gallery --example gallery
       - name: Install verified Inno Setup compiler
         run: |
           $installer = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.0-x64.exe'
@@ -98,6 +100,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then tag="${GITHUB_REF#refs/tags/}"; fi
           version=$(python3 -c 'import re; print(re.search(r"(?m)^version = \"([0-9]+\.[0-9]+\.[0-9]+)\"$", open("Cargo.toml").read()).group(1))')
           test "$tag" = "v$version"
-          args=(release create "$tag" --title "Orbit Widgets $tag" --notes-file docs/RELEASE_NOTES.md)
+          sed "s|https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/|https://raw.githubusercontent.com/$GH_REPO/$GITHUB_SHA/assets/screenshots/|g" docs/RELEASE_NOTES.md > release-notes.md
+          args=(release create "$tag" --title "Orbit Widgets $tag" --notes-file release-notes.md)
           if [[ "$GITHUB_EVENT_NAME" == push ]]; then args+=(--verify-tag); else args+=(--target "$GITHUB_SHA"); fi
           gh "${args[@]}" release-assets/OrbitWidgets-Setup-x64.exe release-assets/OrbitWidgets-Windows-x64.zip release-assets/OrbitWidgets-source.zip release-assets/SHA256SUMS.txt
