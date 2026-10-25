@@ -19,6 +19,34 @@ $executable = Join-Path $StageDir 'OrbitWidgets.exe'
 $bytes = [IO.File]::ReadAllBytes($executable)
 $peOffset = [BitConverter]::ToInt32($bytes,0x3c)
 if ($bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a -or [BitConverter]::ToUInt32($bytes,$peOffset) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes,$peOffset+4) -ne 0x8664) { throw 'Application is not a Windows x64 PE executable.' }
+# Read actual PE imports, not arbitrary strings embedded in the executable.
+$optionalHeader = $peOffset + 24
+if ([BitConverter]::ToUInt16($bytes,$optionalHeader) -ne 0x20b) { throw 'Expected a PE32+ optional header.' }
+$sectionCount = [BitConverter]::ToUInt16($bytes,$peOffset+6)
+$sectionTable = $optionalHeader + [BitConverter]::ToUInt16($bytes,$peOffset+20)
+function Convert-ImportRva([uint32]$rva) {
+    for ($i=0; $i -lt $sectionCount; $i++) {
+        $section = $sectionTable + 40*$i
+        $address = [BitConverter]::ToUInt32($bytes,$section+12)
+        $length = [Math]::Max([BitConverter]::ToUInt32($bytes,$section+8),[BitConverter]::ToUInt32($bytes,$section+16))
+        if ($rva -ge $address -and $rva -lt $address+$length) { return [int]([BitConverter]::ToUInt32($bytes,$section+20)+$rva-$address) }
+    }
+    throw 'Invalid PE import address.'
+}
+$importRva = [BitConverter]::ToUInt32($bytes,$optionalHeader+120)
+if ($importRva) {
+    $descriptor = Convert-ImportRva $importRva
+    while ($true) {
+        $nameRva = [BitConverter]::ToUInt32($bytes,$descriptor+12)
+        if (-not $nameRva) { break }
+        $offset = Convert-ImportRva $nameRva
+        $end = $offset
+        while ($end -lt $bytes.Length -and $bytes[$end] -ne 0) { $end++ }
+        $importName = [Text.Encoding]::ASCII.GetString($bytes,$offset,$end-$offset)
+        if ($importName -match '^(VCRUNTIME|MSVCP|libgcc|libstdc\+\+|libwinpthread)') { throw ('Portable application requires an external compiler runtime: ' + $importName) }
+        $descriptor += 20
+    }
+}
 $stagedHash = (Get-FileHash -LiteralPath $executable).Hash
 $portable = [IO.Compression.ZipFile]::OpenRead((Join-Path $ReleaseDir 'OrbitWidgets-Windows-x64.zip'))
 try {

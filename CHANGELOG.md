@@ -1,5 +1,19 @@
 # Changelog / Изменения
 
+## 1.1.2 — 2026-10-25
+
+### English
+
+- Statically linked the MSVC C runtime in the main Rust executable, removing its dependency on a separately installed Visual C++ runtime. This fixes launch failures on Windows systems without `VCRUNTIME140.dll`.
+- Added a release check that rejects external compiler runtime DLL imports in the main executable before packaging is accepted.
+- The sensor helper still requires .NET Framework, and direct CPU sensor access may require PawnIO and administrator rights.
+
+### Русский
+
+- Основной исполняемый файл на Rust теперь статически связывается с C runtime MSVC и не требует отдельно установленного Visual C++ runtime. Исправлен запуск на системах Windows, где отсутствует `VCRUNTIME140.dll`.
+- Добавлена проверка релиза, которая отклоняет основной исполняемый файл с импортом внешних DLL среды выполнения компилятора.
+- Модулю датчиков по-прежнему нужен .NET Framework; для прямого чтения датчиков ЦП могут потребоваться PawnIO и права администратора.
+
 ## 1.1.1 — 2026-10-25
 
 First public release of Orbit Widgets. This version includes the features developed before publication and the tooltip fix below.
