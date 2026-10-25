@@ -1,0 +1,103 @@
+name: Windows build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Publish a checked version, for example v1.1.1; leave empty for a build only'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Build and verify Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Verify release version
+        run: |
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw),'(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"\r?$').Groups[1].Value
+          if (-not $version) { throw 'Missing application version.' }
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { $env:REQUESTED_RELEASE_TAG }
+          if ($tag -and $tag -ne ('v' + $version)) { throw 'Release tag must match Cargo.toml.' }
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.99.1-x86_64-pc-windows-msvc --profile minimal
+          if ($LASTEXITCODE) { throw 'Rust installation failed.' }
+          rustup override set 1.99.1-x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { throw 'Rust toolchain selection failed.' }
+      - name: Test, compile and stage application
+        run: ./build.ps1
+      - name: Install verified Inno Setup compiler
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.0-x64.exe'
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $installer
+          if ((Get-FileHash -LiteralPath $installer).Hash -ne '0362A383ED217D4C4239B5933866DD96D3EB2102737DA92F80F6057A4B40DF2F') { throw 'Inno Setup checksum mismatch.' }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Pyrsys') { throw 'Invalid Inno Setup publisher.' }
+          $compilerFolder = Join-Path $env:RUNNER_TEMP 'InnoSetup7'
+          $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/NOICONS',('/DIR="' + $compilerFolder + '"')) -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Inno Setup installation failed.' }
+          $compiler = Join-Path $compilerFolder 'ISCC.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'Inno compiler not found.' }
+          "ORBIT_ISCC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build installer and isolated QA installer
+        run: |
+          ./installer/build-installer.ps1 -Compiler $env:ORBIT_ISCC -OutputDir release
+          ./installer/build-installer.ps1 -Compiler $env:ORBIT_ISCC -OutputDir .build-qa -QA
+      - name: Create portable and source archives with checksums
+        run: python scripts/package.py --output-dir release
+      - name: Verify release and test file-copy-only installer
+        run: ./scripts/Test-Release.ps1 -ReleaseDir release -QAInstaller .build-qa/OrbitWidgets-Setup-QA.exe
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: OrbitWidgets-Windows-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish checked release
+    needs: windows
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Download and verify checked packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" --name OrbitWidgets-Windows-x64 --dir release-assets
+          (cd release-assets && sha256sum --check SHA256SUMS.txt)
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
+      - name: Publish release on the checked commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_RELEASE_TAG"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then tag="${GITHUB_REF#refs/tags/}"; fi
+          version=$(python3 -c 'import re; print(re.search(r"(?m)^version = \"([0-9]+\.[0-9]+\.[0-9]+)\"$", open("Cargo.toml").read()).group(1))')
+          test "$tag" = "v$version"
+          args=(release create "$tag" --title "Orbit Widgets $tag" --notes-file docs/RELEASE_NOTES.md)
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then args+=(--verify-tag); else args+=(--target "$GITHUB_SHA"); fi
+          gh "${args[@]}" release-assets/OrbitWidgets-Setup-x64.exe release-assets/OrbitWidgets-Windows-x64.zip release-assets/OrbitWidgets-source.zip release-assets/SHA256SUMS.txt

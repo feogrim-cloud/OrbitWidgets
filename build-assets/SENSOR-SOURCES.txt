@@ -1,0 +1,65 @@
+Orbit Widgets sensor component sources
+Prepared 2026-10-25. Third-party binaries are unmodified.
+
+LibreHardwareMonitorLib 0.9.6 (net472)
+Project: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor
+Exact source: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/tree/v0.9.6
+Official release: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/tag/v0.9.6
+Downloaded archive: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.6/LibreHardwareMonitor.zip
+Archive SHA256: 086D9F1B5A99E643EDC2CFAAAC16051685B551E4C5AC0B32A57C58C0E529C001
+License: MPL-2.0, with embedded PawnIO.Modules under LGPL-2.1.
+Full notices: sensors/licenses/LibreHardwareMonitor-THIRD-PARTY-NOTICES.txt
+MPL text: sensors/licenses/LibreHardwareMonitor-MPL-2.0.txt
+Build target is .NET Framework 4.7.2. Uses the Windows-provided System.Management assembly.
+
+Runtime DLLs copied directly from the official release archive:
+LibreHardwareMonitorLib.dll 0.9.6.0 SHA256 6EBC194316536BA61AF5BE24508AD9FCBB2ECC685E716C12E787C79530F66BF0
+BlackSharp.Core.dll 1.0.7.0 SHA256 CAFB93AFCC8D8A367E21F619673D05C06887D8964867FED1371F02DED1CD3E23
+DiskInfoToolkit.dll 1.1.2.0 SHA256 1ACBF51B3C10C51C986CF43021680D34A2E38D9A5BA652BCFA9A1B5F7FC09800
+HidSharp.dll 2.6.4.0 SHA256 D86690EFDE30EA9179F669320F39148853793B743A98B531AFEAF30598E22F54
+RAMSPDToolkit-NDD.dll 1.4.2.0 SHA256 B6882354C7C8EC186617E421507743DBFAE09C5C1FC24CEF76A1D0C0C26651DE
+System.Buffers.dll SHA256 2D78D770C9CB997199154AE8C018B9F1D1EFBC86729F7264DDE6DBAD2A12CAC3
+System.Memory.dll SHA256 D5E8E4866F9CFA66F7765660F84B210198893E55335487AFE5EBDA342C0E913D
+System.Numerics.Vectors.dll SHA256 20C2FA81B8C70D651099D762954F285FD4F942E63B2D7217C145DAB8D4B2F4C9
+System.Runtime.CompilerServices.Unsafe.dll SHA256 08CBD7278B66F1E68425A82D4B97181A4130D93E3DD91831407ABA7212CCDACF
+System.Threading.AccessControl.dll SHA256 5E3A3902F04F840C0FC1F9C2F249F804F6CFDF7901B2E06778BC2A4603AE4694
+
+Additional project/license information:
+BlackSharp.Core: MPL-2.0, https://github.com/Blacktempel/BlackSharp ; https://www.nuget.org/packages/BlackSharp.Core/1.0.7
+DiskInfoToolkit: MPL-2.0, https://github.com/Blacktempel/DiskInfoToolkit ; https://www.nuget.org/packages/DiskInfoToolkit/1.1.2
+RAMSPDToolkit-NDD: MPL-2.0, https://github.com/Blacktempel/RAMSPDToolkit/tree/1.4.2 ; https://www.nuget.org/packages/RAMSPDToolkit-NDD/1.4.2
+HidSharp: Apache-2.0, https://github.com/IntergatedCircuits/HidSharp/tree/main-2.6 ; https://www.nuget.org/packages/HidSharp/2.6.4
+Microsoft System.* packages: MIT, https://github.com/dotnet/runtime ; sensors/licenses/Microsoft-NET-MIT.txt
+PawnIO.Modules: LGPL-2.1, https://github.com/namazso/PawnIO.Modules ; see LHM embedded-resource source in the exact tag above.
+
+Optional PawnIO driver installer (not executed during preparation)
+Official site: https://pawnio.eu/
+Official release: https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0
+Download: https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe
+Stored as: optional/PawnIO-Setup.exe
+SHA256: 1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032
+Hash matches the release asset's GitHub API sha256 digest.
+Authenticode signature checked: Valid, signer E=admin@namazso.eu, CN=namazso.eu, O=namazso, L=Debrecen, C=HU.
+Certificate issuer: GLOBALTRUST 2015 CODESIGNING 1.
+Driver source: https://github.com/namazso/PawnIO
+License: GPL-2.0-or-later with the author's device-IO-control linking exception; see optional/PawnIO-README.txt and optional/PawnIO-COPYING.txt.
+Use only the default official signed edition. Do not select unrestricted edition or change system signature/security settings.
+Installer command line documented by LHM project discussion: -install -silent
+Uninstall counterpart: -uninstall -silent
+Installer release 2.2.0 returns Windows/DOS error codes; 3010 means success with reboot required. Do not force a reboot.
+An installer is included only as an optional, separate component. It installs a system-wide kernel driver and needs administrator approval.
+
+Driver detection used by LibreHardwareMonitor 0.9.6:
+Type: LibreHardwareMonitor.PawnIo.PawnIo
+Public static properties: IsInstalled (bool), Version (System.Version).
+It reads HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO, DisplayVersion.
+IsLoaded is an INSTANCE property checking the opened device handle; it is not a static installation test.
+Device accessed: \\?\GLOBALROOT\Device\PawnIO
+Relevant exact source: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/blob/v0.9.6/LibreHardwareMonitorLib/PawnIo/PawnIo.cs
+Ryzen CPU implementation: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/blob/v0.9.6/LibreHardwareMonitorLib/Hardware/Cpu/Amd17Cpu.cs
+
+Validation notes:
+The packaged reflection helper loads the above DLL set and reads the local NVIDIA GPU sensors without a DLL-load error.
+CPU temperature is not validated without a loaded PawnIO device and hardware-access permissions. A zero fallback value must be treated as unavailable, not as 0 degrees C.
+The official PawnIO 2.2.0 release fixes the older 2.1.0 Windows 10 RS5/19H1/19H2 missing-export BSOD issue. No driver has been installed or tested as part of component preparation.
+Do not package sensors/.source into the user distribution: it is scratch download/inspection data including the original LHM GUI archive, not required runtime files.

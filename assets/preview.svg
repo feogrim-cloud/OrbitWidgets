@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="220" viewBox="0 0 920 220" role="img" aria-labelledby="title desc">
+  <title id="title">Orbit Widgets dual-ring design illustration</title>
+  <desc id="desc">Example CPU, GPU, memory and network readings drawn as circular widgets. This is an illustration, not a screenshot. The surrounding background is transparent.</desc>
+  <defs>
+    <style>
+      .face { fill: #121925; fill-opacity: .94; }
+      .track { fill: none; stroke: #29374d; }
+      .ring { fill: none; stroke-linecap: round; transform: rotate(-90deg); }
+      .label { font: 14px 'Segoe UI', Arial, sans-serif; fill: #a4b8cc; text-anchor: middle; }
+      .value { font: 30px 'Segoe UI', Arial, sans-serif; fill: #e9ffff; text-anchor: middle; }
+      .detail { font: 16px 'Segoe UI', Arial, sans-serif; fill: #a4b8cc; text-anchor: middle; }
+    </style>
+  </defs>
+  <g transform="translate(115 110)">
+    <circle class="face" r="83"/>
+    <circle class="track" r="88" stroke-width="7"/>
+    <circle class="track" r="75" stroke-width="4"/>
+    <circle class="ring" r="88" stroke="#28e3ff" stroke-width="7" stroke-dasharray="154.8 552.9"/>
+    <circle class="ring" r="75" stroke="#ff9e5f" stroke-width="4" stroke-dasharray="259.2 471.3"/>
+    <text class="label" y="-29">ЦП</text>
+    <text class="value" y="7">28%</text>
+    <text class="detail" y="35">55 °C</text>
+  </g>
+  <g transform="translate(345 110)">
+    <circle class="face" r="83"/>
+    <circle class="track" r="88" stroke-width="7"/>
+    <circle class="track" r="75" stroke-width="4"/>
+    <circle class="ring" r="88" stroke="#76ffb0" stroke-width="7" stroke-dasharray="359.4 552.9"/>
+    <circle class="ring" r="75" stroke="#ff9e5f" stroke-width="4" stroke-dasharray="292.2 471.3"/>
+    <text class="label" y="-29">ГП</text>
+    <text class="value" y="7">65%</text>
+    <text class="detail" y="35">62 °C</text>
+  </g>
+  <g transform="translate(575 110)">
+    <circle class="face" r="83"/>
+    <circle class="track" r="88" stroke-width="7"/>
+    <circle class="ring" r="88" stroke="#28e3ff" stroke-width="7" stroke-dasharray="276.5 552.9"/>
+    <text class="label" y="-29">ОЗУ</text>
+    <text class="value" y="7">16,0</text>
+    <text class="detail" y="35">из 32 ГБ</text>
+  </g>
+  <g transform="translate(805 110)">
+    <circle class="face" r="83"/>
+    <circle class="track" r="88" stroke-width="7"/>
+    <circle class="track" r="75" stroke-width="4"/>
+    <circle class="ring" r="88" stroke="#28e3ff" stroke-width="7" stroke-dasharray="44.2 552.9"/>
+    <circle class="ring" r="75" stroke="#c480ff" stroke-width="4" stroke-dasharray="5.7 471.3"/>
+    <text class="label" y="-29">СЕТЬ · Мбит/с</text>
+    <text class="value" y="7">↓ 8,0</text>
+    <text class="detail" y="35">↑ 1,2</text>
+  </g>
+</svg>

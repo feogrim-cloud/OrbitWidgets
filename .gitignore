@@ -1,0 +1,21 @@
+/target/
+/dist/
+/release/
+/release-qa/
+/.build-qa/
+/work/
+/build-assets/cargo-metadata.json
+/build-assets/sensors/.source/
+/build-assets/sensors/OrbitSensors.exe
+/sensor-helper/OrbitSensors.exe
+**/__pycache__/
+*.pyc
+*.pdb
+*.log
+settings.json*
+diagnostics*.json
+.env
+.env.*
+
+# Pinned, unmodified vendor DLLs and the signed optional driver installer are
+# intentional build inputs. Do not ignore all *.dll or *.exe files.
