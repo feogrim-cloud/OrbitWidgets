@@ -48,7 +48,7 @@ fn main() -> eframe::Result<()> {
         if !args.iter().any(|arg| arg == "--autostart") { platform::show_existing(); }
         return Ok(());
     }
-    let first_launch = !config::config_path().exists();
+    let first_launch = !config::Config::has_saved_profile();
     let mut config = config::Config::load();
     if first_launch { config.monitor_index = platform::default_monitor_index(); }
     let (rx, commands) = metrics::start_monitor();

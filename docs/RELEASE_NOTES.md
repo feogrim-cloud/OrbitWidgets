@@ -1,4 +1,4 @@
-# Orbit Widgets v1.1.2
+# Orbit Widgets v1.1.3
 
 ## Интерфейс / Interface
 
@@ -20,7 +20,7 @@
 
 Orbit Widgets provides transparent circular performance widgets for Windows x64. The application interface is in Russian.
 
-**Packaging fix in v1.1.2:** the main Rust executable now statically links the MSVC C runtime, so it does not require a separately installed Visual C++ runtime. Release verification checks the executable's DLL imports to prevent that dependency from returning. The sensor helper still requires .NET Framework; direct CPU sensor access may require PawnIO and administrator rights.
+**Settings reliability in v1.1.3:** settings are flushed to a temporary file and replaced atomically. A validated `settings.json.bak` is used if the main profile is missing or damaged, including the saved monitor selection. Continuous slider edits and dragging no longer postpone saving indefinitely; temporary write failures are retried.
 
 - Monitor CPU/GPU load and temperature, used RAM, occupied drive space by letter, and network receive/send traffic in Mbit/s or MB/s.
 - Combine load and temperature in the dual-ring design. Choose individual metrics, vertical or horizontal placement, size, spacing, opacity, four themes, monitor and screen anchor.
@@ -46,7 +46,7 @@ Existing settings are preserved. Close Orbit Widgets before updating. Portable u
 
 Orbit Widgets — прозрачные круглые виджеты производительности для Windows x64 с русским интерфейсом.
 
-**Исправление упаковки в v1.1.2:** основной файл на Rust теперь статически связывается с C runtime MSVC и не требует отдельно установленного Visual C++ runtime. Проверка релиза контролирует импорт DLL, чтобы эта зависимость не появилась снова. Модулю датчиков по-прежнему нужен .NET Framework; для прямого чтения датчиков ЦП могут потребоваться PawnIO и права администратора.
+**Надёжное сохранение в v1.1.3:** настройки записываются во временный файл с последующей атомарной заменой. Если основной профиль отсутствует или повреждён, используется проверенная копия `settings.json.bak`, включая выбранный монитор. Непрерывное движение ползунков и перетаскивание больше не откладывают запись бесконечно; при временной ошибке сохранение повторяется.
 
 - Нагрузка и температура ЦП/ГП, занятая оперативная память, занятое место на дисках по буквам, приём и отдача сети в Мбит/с или МБ/с.
 - Оформление «Двойной контур» объединяет нагрузку и температуру. Можно выбирать показатели, вертикальное или горизонтальное размещение, размер, расстояние, непрозрачность, одну из четырёх тем, монитор и привязку к экрану.

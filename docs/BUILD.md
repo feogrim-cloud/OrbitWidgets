@@ -74,6 +74,7 @@ This produces `OrbitWidgets-Setup-QA.exe`. The QA build disables driver executio
 - Verify archive integrity and publish SHA-256 checksums for the download assets.
 - Check the affected UI manually, including a narrow vertical layout, the edge of a secondary monitor, negative desktop coordinates where applicable, and differing display scales.
 - For startup changes, verify task ownership and privilege mode in the actual interactive Windows session, then clean up temporary test tasks.
+- When launching from a packaged development tool, verify the profile from the ordinary Windows startup session as well. MSIX AppData virtualization can give the development process a separate private profile even when the apparent path is identical. Do not bundle or publish user profiles during this check.
 - For sensor changes, record the hardware and real provider tested. Test missing and stale readings as well as successful readings; do not install a kernel driver merely to run a generic build check.
 
 Release tags use `v` followed by the application version, for example `v1.1.2`. Keep a portable application in a permanent location before enabling startup. Personal profiles, diagnostics, toolchain downloads and temporary test artifacts must not be included in a source archive or release package.

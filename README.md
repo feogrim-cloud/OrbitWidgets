@@ -83,7 +83,7 @@ An unavailable sensor is shown as **—**, rather than a fabricated zero. Other 
 
 In Settings, **Запуск → Запускать при входе в Windows** enables startup at sign-in. **С правами администратора** requests elevated startup. Windows may ask for administrator confirmation when this setting changes. The task runs in the current user's interactive session after a ten-second delay; no password is stored. Enabling startup does not change the privileges of the already running instance.
 
-Settings are stored locally at `%LOCALAPPDATA%\Orbit Widgets\settings.json`. The application does not send monitoring readings to an Internet service. Portable and installed copies use this same current-user profile by default.
+Settings are stored locally at `%LOCALAPPDATA%\Orbit Widgets\settings.json`, with a last-good copy in `settings.json.bak`. Changes are saved automatically; a damaged primary file is recovered from the backup. The application does not send monitoring readings to an Internet service. Portable and installed copies use this same current-user profile by default.
 
 To update, close Orbit Widgets and install the new version, or replace the complete portable application folder with the new package. Keep your settings file. If a portable copy uses startup, keep its path stable or disable startup in the old copy and enable it again from the new location. The installer preserves the settings and does not remove the shared PawnIO driver when uninstalling the application.
 

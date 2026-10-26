@@ -218,7 +218,10 @@ impl WidgetApp {
         }
     }
 
-    fn mark_changed(&mut self) { self.save_at = Some(Instant::now() + Duration::from_millis(600)); }
+    fn mark_changed(&mut self) {
+        // Continuous slider edits and window dragging must not postpone saving indefinitely.
+        self.save_at.get_or_insert_with(|| Instant::now() + Duration::from_millis(600));
+    }
 
     fn set_locked(&mut self, locked: bool) {
         self.config.locked = locked;
@@ -602,7 +605,13 @@ impl eframe::App for WidgetApp {
             if closed { self.settings_open = false; }
         }
         if self.save_at.is_some_and(|deadline| Instant::now() >= deadline) {
-            self.save_error = self.config.save().err().map(|error| error.to_string()); self.save_at = None;
+            match self.config.save() {
+                Ok(()) => { self.save_error = None; self.save_at = None; }
+                Err(error) => {
+                    self.save_error = Some(error.to_string());
+                    self.save_at = Some(Instant::now() + Duration::from_secs(2));
+                }
+            }
         }
         ctx.request_repaint_after(if animating { Duration::from_millis(33) } else { Duration::from_millis(250) });
     }

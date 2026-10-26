@@ -1,5 +1,17 @@
 # Changelog / Изменения
 
+## 1.1.3 — 2026-10-26
+
+### English
+
+- Settings are flushed to a temporary file and replaced atomically, with a validated last-good backup used for recovery. Recovering a profile also preserves the selected monitor.
+- Continuous edits no longer postpone saving indefinitely, and temporary save failures are retried.
+
+### Русский
+
+- Настройки записываются с атомарной заменой файла и резервной копией для восстановления. При восстановлении сохраняется выбранный монитор.
+- Непрерывное изменение настроек больше не откладывает запись бесконечно; при временной ошибке программа повторяет сохранение.
+
 ## 1.1.2 — 2026-10-25
 
 ### English

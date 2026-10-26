@@ -2,7 +2,7 @@
 ; SourceDir, BuildAssetsDir, OutputDir and AppVersion can be overridden with /D.
 ; OrbitSetupQA builds a non-elevating, file-copy-only test installer.
 #ifndef AppVersion
-  #define AppVersion "1.1.2"
+  #define AppVersion "1.1.3"
 #endif
 #ifndef SourceDir
   #define SourceDir AddBackslash(SourcePath) + "..\dist"
