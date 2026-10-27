@@ -71,7 +71,12 @@ CPU/GPU load, memory and network are sampled every **500 ms**. The sensor helper
 
 ## Sensor availability
 
-NVIDIA GPU readings use **NVML** from the installed NVIDIA driver without launching `nvidia-smi` for each sample. When direct readings are unavailable, a bundled helper tries the CPU and GPU sensors exposed by **LibreHardwareMonitor 0.9.6**. Available readings depend on the hardware, driver and access permissions; support for every GPU or sensor is not guaranteed.
+The GPU circle can also show used / total dedicated video memory. Turn the line
+off with **ГП · видеопамять** in Settings. Memory is read from the same NVIDIA
+adapter once per second using NVML v2 with a v1 fallback; driver reserve accounting
+can differ from Windows. Shared system RAM is excluded.
+
+GPU load prefers **Windows WDDM** counters for the same uniquely identified NVIDIA adapter, using the busiest engine as Task Manager does. GPU temperature uses **NVML** from the installed NVIDIA driver without launching `nvidia-smi` for each sample. NVML is also a labelled load fallback if Windows counters are unavailable or the adapter cannot be mapped safely. The tooltip identifies the active load source; the two providers use different definitions and sample windows, so fallback readings can differ. When direct readings are unavailable, a bundled helper tries the CPU and GPU sensors exposed by **LibreHardwareMonitor 0.9.6**. Available readings depend on hardware, drivers and access permissions.
 
 CPU temperature can also be read from the fresh shared-memory reading of an already running **MSI Afterburner**. Orbit Widgets does not install or start Afterburner. Direct CPU access through LibreHardwareMonitor may require the **PawnIO** driver and administrator rights.
 

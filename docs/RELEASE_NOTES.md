@@ -1,6 +1,10 @@
-# Orbit Widgets v1.1.3
+# Orbit Widgets v1.1.5
 
 ## Интерфейс / Interface
+
+**1.1.5:** optional dedicated GPU memory (used / total) inside the GPU circle; temperature moves beside the GPU title when both load and memory are enabled. **1.1.5:** отключаемая строка занятой и общей видеопамяти внутри круга ГП; температура переносится к подписи, когда показаны нагрузка и память. The readings come from the same NVIDIA adapter. Показания относятся к тому же адаптеру NVIDIA.
+
+[![Круг ГП с видеопамятью, 83 и 128 px · GPU memory at 83 and 128 px](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/gpu-memory.png)](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/gpu-memory.png)
 
 Настоящий интерфейс с демонстрационными показаниями. The actual interface rendered with demonstration readings. Нейтральная подложка не является панелью приложения. The neutral backdrop is not an application panel.
 
@@ -20,7 +24,7 @@
 
 Orbit Widgets provides transparent circular performance widgets for Windows x64. The application interface is in Russian.
 
-**Settings reliability in v1.1.3:** settings are flushed to a temporary file and replaced atomically. A validated `settings.json.bak` is used if the main profile is missing or damaged, including the saved monitor selection. Continuous slider edits and dragging no longer postpone saving indefinitely; temporary write failures are retried.
+**Tray and GPU monitoring fixes in v1.1.4:** the tray icon is restored after Explorer restarts, including elevated startup, and the widget windows remain off the taskbar. GPU load prefers Windows WDDM counters for the same uniquely identified NVIDIA adapter, using the busiest engine like Task Manager. NVIDIA remains the temperature source and a labelled load fallback. The tooltip identifies the load source.
 
 - Monitor CPU/GPU load and temperature, used RAM, occupied drive space by letter, and network receive/send traffic in Mbit/s or MB/s.
 - Combine load and temperature in the dual-ring design. Choose individual metrics, vertical or horizontal placement, size, spacing, opacity, four themes, monitor and screen anchor.
@@ -46,7 +50,7 @@ Existing settings are preserved. Close Orbit Widgets before updating. Portable u
 
 Orbit Widgets — прозрачные круглые виджеты производительности для Windows x64 с русским интерфейсом.
 
-**Надёжное сохранение в v1.1.3:** настройки записываются во временный файл с последующей атомарной заменой. Если основной профиль отсутствует или повреждён, используется проверенная копия `settings.json.bak`, включая выбранный монитор. Непрерывное движение ползунков и перетаскивание больше не откладывают запись бесконечно; при временной ошибке сохранение повторяется.
+**Исправления трея и мониторинга ГП в v1.1.4:** значок трея восстанавливается после перезапуска Проводника, в том числе при повышенном автозапуске, а окна виджетов остаются вне панели задач. Нагрузка ГП предпочтительно берётся из счётчиков Windows WDDM того же однозначно определённого адаптера NVIDIA: используется самый занятый движок, как в диспетчере задач. NVIDIA остаётся источником температуры и явно обозначенным резервным источником нагрузки. Источник нагрузки указан в подсказке.
 
 - Нагрузка и температура ЦП/ГП, занятая оперативная память, занятое место на дисках по буквам, приём и отдача сети в Мбит/с или МБ/с.
 - Оформление «Двойной контур» объединяет нагрузку и температуру. Можно выбирать показатели, вертикальное или горизонтальное размещение, размер, расстояние, непрозрачность, одну из четырёх тем, монитор и привязку к экрану.

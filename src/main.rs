@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod gpu_windows;
 mod metrics;
 mod model;
 mod platform;

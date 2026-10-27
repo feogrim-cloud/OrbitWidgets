@@ -20,6 +20,7 @@ mod startup {
 }
 
 mod platform {
+    pub fn prepare_taskbar_windows() {}
     pub fn monitor_names() -> Vec<String> { vec!["Экран 1 · DISPLAY1".into(), "Экран 2 · DISPLAY2".into()] }
     pub fn work_area_size(_index: usize) -> [f32; 2] { [1920.0, 1040.0] }
     pub fn anchor_position(_anchor: crate::config::Anchor, _index: usize, _size: [f32; 2], _margin: f32, _ppp: f32) -> Option<[f32; 2]> { None }

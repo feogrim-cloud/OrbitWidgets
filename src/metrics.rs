@@ -1,4 +1,4 @@
-use crate::model::{DiskMetric, Metrics};
+use crate::{gpu_windows::{same_adapter_name, WindowsGpuUsage}, model::{DiskMetric, Metrics}};
 pub use crate::model::MonitorCommand;
 use libloading::Library;
 use serde::Deserialize;
@@ -24,6 +24,9 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
         let mut system = System::new();
         system.refresh_cpu_usage();
         let mut gpu = Nvml::open();
+        let mut windows_gpu = gpu.as_ref().filter(|device| device.single_device)
+            .and_then(|device| WindowsGpuUsage::open_for_name(&device.name));
+        let mut last_windows_attempt = gpu.as_ref().map(|_| Instant::now());
         let mut shared_cpu = SharedCpuTemperature::default();
         let helper_state = Arc::new(Mutex::new(HelperState::default()));
         // Reuse an already-running sensor provider before starting another
@@ -79,7 +82,14 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
             if let Some(nvml) = gpu.as_mut() {
                 metric.gpu_name = nvml.name.clone();
                 metric.gpu_usage = nvml.utilization();
+                metric.gpu_usage_nvml = metric.gpu_usage;
+                if metric.gpu_usage.is_some() { metric.gpu_usage_source = "NVIDIA NVML · резервный источник".into(); }
                 metric.gpu_temp = nvml.temperature();
+                if let Some(memory) = nvml.memory() {
+                    metric.gpu_memory_used = Some(memory.used);
+                    metric.gpu_memory_total = Some(memory.total);
+                    metric.gpu_memory_source = format!("NVIDIA NVML v{}", memory.api_version);
+                }
             }
             if let Ok(state) = helper_state.lock() {
                 let fresh = state.updated.map(|t| t.elapsed() < Duration::from_secs(4)).unwrap_or(false);
@@ -87,11 +97,40 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
                 metric.temperature_status = state.status.clone();
                 if fresh {
                     metric.cpu_temp = valid_temperature(state.data.cpu_temp);
-                    if metric.gpu_usage.is_none() { metric.gpu_usage = state.data.gpu_usage.and_then(finite_percent); }
-                    if metric.gpu_temp.is_none() { metric.gpu_temp = valid_temperature(state.data.gpu_temp); }
+                    let same_gpu = metric.gpu_name.is_empty() || same_adapter_name(&metric.gpu_name, &state.data.gpu_name);
+                    if same_gpu && metric.gpu_usage.is_none() {
+                        metric.gpu_usage = state.data.gpu_usage.and_then(finite_percent);
+                        if metric.gpu_usage.is_some() { metric.gpu_usage_source = "LibreHardwareMonitor · резервный источник".into(); }
+                    }
+                    if same_gpu && metric.gpu_temp.is_none() { metric.gpu_temp = valid_temperature(state.data.gpu_temp); }
                     if metric.gpu_name.is_empty() { metric.gpu_name = state.data.gpu_name.clone(); }
                 } else if state.updated.is_some() && metric.sensor_helper_running {
                     metric.temperature_status = "Датчики временно не отвечают".into();
+                }
+            }
+            // Never take load from an unrelated active GPU. DXGI must provide
+            // a unique exact hardware-name match for the temperature adapter.
+            // Multi-NVIDIA configurations retain NVML until physical PCI identity
+            // can be mapped unambiguously, rather than guessing by GPU number.
+            let can_map_gpu = gpu.as_ref().map_or(true, |device| device.single_device);
+            if windows_gpu.as_ref().is_some_and(|windows| !windows.matches_name(&metric.gpu_name)) {
+                windows_gpu = None;
+                last_windows_attempt = None;
+            }
+            if windows_gpu.is_none() && can_map_gpu && !metric.gpu_name.is_empty()
+                && last_windows_attempt.map_or(true, |time: Instant| time.elapsed() >= Duration::from_secs(30)) {
+                last_windows_attempt = Some(Instant::now());
+                windows_gpu = WindowsGpuUsage::open_for_name(&metric.gpu_name);
+            }
+            if let Some(windows) = windows_gpu.as_mut() {
+                metric.gpu_adapter_luid = windows.luid.label();
+                if let Some(usage) = windows.sample() {
+                    metric.gpu_usage = Some(usage);
+                    metric.gpu_usage_source = "Windows WDDM · наиболее занятый движок".into();
+                }
+                if windows.needs_reopen() {
+                    windows_gpu = None;
+                    last_windows_attempt = Some(Instant::now());
                 }
             }
             if metric.cpu_temp.is_none() {
@@ -217,20 +256,60 @@ type NvmlHandle = *mut c_void;
 type Init = unsafe extern "C" fn() -> u32;
 type Shutdown = unsafe extern "C" fn() -> u32;
 type GetHandle = unsafe extern "C" fn(u32, *mut NvmlHandle) -> u32;
+type GetCount = unsafe extern "C" fn(*mut u32) -> u32;
 type GetName = unsafe extern "C" fn(NvmlHandle, *mut c_char, u32) -> u32;
 type GetUtil = unsafe extern "C" fn(NvmlHandle, *mut NvmlUtilization) -> u32;
 type GetTemp = unsafe extern "C" fn(NvmlHandle, u32, *mut u32) -> u32;
+type GetMemory = unsafe extern "C" fn(NvmlHandle, *mut NvmlMemory) -> u32;
+type GetMemoryV2 = unsafe extern "C" fn(NvmlHandle, *mut NvmlMemoryV2) -> u32;
 #[repr(C)] struct NvmlUtilization { gpu: u32, memory: u32 }
+#[repr(C)]
+#[derive(Default)]
+struct NvmlMemory { total: u64, free: u64, used: u64 }
+#[repr(C)]
+#[derive(Default)]
+struct NvmlMemoryV2 { version: u32, total: u64, reserved: u64, free: u64, used: u64 }
+// NVIDIA's NVML_STRUCT_VERSION(Memory, 2) includes both the version and byte size.
+const NVML_MEMORY_V2_VERSION: u32 = std::mem::size_of::<NvmlMemoryV2>() as u32 | (2 << 24);
+
+#[derive(Clone, Copy)]
+struct GpuMemory { used: u64, total: u64, api_version: u8 }
+
+fn valid_gpu_memory(used: u64, total: u64, api_version: u8) -> Option<GpuMemory> {
+    (total > 0 && total != u64::MAX && used <= total).then_some(GpuMemory { used, total, api_version })
+}
+
+fn query_nvml_memory(device: NvmlHandle, get_v2: Option<GetMemoryV2>, get_v1: Option<GetMemory>) -> Option<GpuMemory> {
+    if let Some(get) = get_v2 {
+        let mut value = NvmlMemoryV2 { version: NVML_MEMORY_V2_VERSION, ..NvmlMemoryV2::default() };
+        if unsafe { get(device, &mut value) } == 0 {
+            // Keep the driver's allocated value unchanged. Reserved-memory
+            // accounting differs between API/driver versions; do not add or
+            // subtract that field or mix this snapshot with Windows counters.
+            if let Some(memory) = valid_gpu_memory(value.used, value.total, 2)
+                .filter(|_| value.free <= value.total && value.reserved <= value.total) { return Some(memory); }
+        }
+    }
+    let get = get_v1?;
+    let mut value = NvmlMemory::default();
+    if unsafe { get(device, &mut value) } != 0 || value.free > value.total { return None; }
+    valid_gpu_memory(value.used, value.total, 1)
+}
 
 struct Nvml {
     _library: Library,
     shutdown: Shutdown,
     get_util: GetUtil,
     get_temp: GetTemp,
+    get_memory: Option<GetMemory>,
+    get_memory_v2: Option<GetMemoryV2>,
     device: NvmlHandle,
     name: String,
+    single_device: bool,
     last_temperature_read: Option<Instant>,
     cached_temperature: Option<f32>,
+    last_memory_read: Option<Instant>,
+    cached_memory: Option<GpuMemory>,
 }
 
 impl Nvml {
@@ -251,15 +330,23 @@ impl Nvml {
         let get_name: GetName = *library.get(b"nvmlDeviceGetName\0").ok()?;
         let get_util: GetUtil = *library.get(b"nvmlDeviceGetUtilizationRates\0").ok()?;
         let get_temp: GetTemp = *library.get(b"nvmlDeviceGetTemperature\0").ok()?;
+        // Memory support is optional and must not disable load or temperature.
+        let get_memory = library.get::<GetMemory>(b"nvmlDeviceGetMemoryInfo\0").ok().map(|symbol| *symbol);
+        let get_memory_v2 = library.get::<GetMemoryV2>(b"nvmlDeviceGetMemoryInfo_v2\0").ok().map(|symbol| *symbol);
         if init() != 0 { return None; }
         let mut device = std::ptr::null_mut();
         if get_handle(0, &mut device) != 0 { shutdown(); return None; }
+        let count_function = library.get::<GetCount>(b"nvmlDeviceGetCount_v2\0")
+            .or_else(|_| library.get::<GetCount>(b"nvmlDeviceGetCount\0")).ok();
+        let single_device = count_function.is_some_and(|function| {
+            let mut count = 0; function(&mut count) == 0 && count == 1
+        });
         let mut name_buffer = [0 as c_char; 128];
         let name = if get_name(device, name_buffer.as_mut_ptr(), name_buffer.len() as u32) == 0 {
             CStr::from_ptr(name_buffer.as_ptr()).to_string_lossy().into_owned()
         } else { "NVIDIA GPU".into() };
-        Some(Self { _library: library, shutdown, get_util, get_temp, device, name,
-            last_temperature_read: None, cached_temperature: None })
+        Some(Self { _library: library, shutdown, get_util, get_temp, get_memory, get_memory_v2, device, name, single_device,
+            last_temperature_read: None, cached_temperature: None, last_memory_read: None, cached_memory: None })
     }
 
     fn utilization(&mut self) -> Option<f32> {
@@ -276,6 +363,15 @@ impl Nvml {
         } else { None };
         self.last_temperature_read = Some(Instant::now());
         self.cached_temperature
+    }
+
+    fn memory(&mut self) -> Option<GpuMemory> {
+        if self.last_memory_read.is_some_and(|time| time.elapsed() < Duration::from_secs(1)) {
+            return self.cached_memory;
+        }
+        self.cached_memory = query_nvml_memory(self.device, self.get_memory_v2, self.get_memory);
+        self.last_memory_read = Some(Instant::now());
+        self.cached_memory
     }
 }
 impl Drop for Nvml { fn drop(&mut self) { unsafe { (self.shutdown)(); } } }
@@ -534,6 +630,46 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nvml_memory_layout_and_version_match_nvidia_x64_header() {
+        assert_eq!(std::mem::size_of::<NvmlMemory>(), 24);
+        assert_eq!(std::mem::offset_of!(NvmlMemory, used), 16);
+        assert_eq!(std::mem::size_of::<NvmlMemoryV2>(), 40);
+        assert_eq!(std::mem::offset_of!(NvmlMemoryV2, total), 8);
+        assert_eq!(std::mem::offset_of!(NvmlMemoryV2, reserved), 16);
+        assert_eq!(std::mem::offset_of!(NvmlMemoryV2, free), 24);
+        assert_eq!(std::mem::offset_of!(NvmlMemoryV2, used), 32);
+        assert_eq!(NVML_MEMORY_V2_VERSION, 0x0200_0028);
+    }
+
+    #[test]
+    fn gpu_memory_rejects_invalid_capacity_and_keeps_real_zero_usage() {
+        assert!(valid_gpu_memory(0, 0, 2).is_none());
+        assert!(valid_gpu_memory(101, 100, 2).is_none());
+        assert!(valid_gpu_memory(u64::MAX, u64::MAX, 2).is_none());
+        assert_eq!(valid_gpu_memory(0, 12 * 1_073_741_824, 2).unwrap().used, 0);
+        assert!(query_nvml_memory(std::ptr::null_mut(), None, None).is_none());
+    }
+
+    #[test]
+    fn nvml_memory_prefers_v2_and_falls_back_to_v1_without_inventing_values() {
+        unsafe extern "C" fn v2(_device: NvmlHandle, output: *mut NvmlMemoryV2) -> u32 {
+            if (*output).version != 0x0200_0028 { return 25; }
+            *output = NvmlMemoryV2 { version: (*output).version, total: 12_000, reserved: 500, free: 9_000, used: 2_500 };
+            0
+        }
+        unsafe extern "C" fn unsupported(_device: NvmlHandle, _output: *mut NvmlMemoryV2) -> u32 { 3 }
+        unsafe extern "C" fn v1(_device: NvmlHandle, output: *mut NvmlMemory) -> u32 {
+            *output = NvmlMemory { total: 12_000, free: 9_000, used: 3_000 };
+            0
+        }
+        let memory = query_nvml_memory(std::ptr::null_mut(), Some(v2), Some(v1)).unwrap();
+        assert_eq!((memory.used, memory.total, memory.api_version), (2_500, 12_000, 2));
+        let fallback = query_nvml_memory(std::ptr::null_mut(), Some(unsupported), Some(v1)).unwrap();
+        assert_eq!((fallback.used, fallback.total, fallback.api_version), (3_000, 12_000, 1));
+        assert!(query_nvml_memory(std::ptr::null_mut(), Some(unsupported), None).is_none());
+    }
 
     #[test]
     fn missing_pawnio_zero_from_real_helper_payload_is_not_a_temperature() {

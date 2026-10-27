@@ -12,7 +12,15 @@ pub struct Metrics {
     pub cpu_usage: Option<f32>,
     pub cpu_temp: Option<f32>,
     pub gpu_usage: Option<f32>,
+    pub gpu_usage_source: String,
+    /// Unmodified NVIDIA sample for diagnostics; the displayed load prefers WDDM.
+    pub gpu_usage_nvml: Option<f32>,
+    pub gpu_adapter_luid: String,
     pub gpu_temp: Option<f32>,
+    /// Dedicated framebuffer bytes reported by the same NVIDIA device as temperature.
+    pub gpu_memory_used: Option<u64>,
+    pub gpu_memory_total: Option<u64>,
+    pub gpu_memory_source: String,
     pub gpu_name: String,
     pub ram_used: u64,
     pub ram_total: u64,

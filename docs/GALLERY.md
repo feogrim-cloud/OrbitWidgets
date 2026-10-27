@@ -1,5 +1,8 @@
 # Interface images
 
+The `gpu-memory` scene renders the actual GPU circle at 83 and 128 px with fixed
+dedicated-memory readings. It uses the same isolated, no-profile renderer.
+
 The PNG gallery is exported from the application's actual egui gauge and settings
 rendering code. Readings are fixed demonstration values. The development renderer
 does not read or save a user profile, collect hardware metrics, register hotkeys,

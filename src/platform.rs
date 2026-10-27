@@ -1,5 +1,5 @@
 use crate::{config::Anchor, ui::UiSignals};
-use std::{ffi::OsStr, os::windows::ffi::OsStrExt, sync::{atomic::Ordering, Arc}, mem::{size_of, zeroed}, ptr::{null, null_mut}};
+use std::{cell::Cell, ffi::OsStr, os::windows::ffi::OsStrExt, sync::{atomic::Ordering, Arc}, mem::{size_of, zeroed}, ptr::{null, null_mut}};
 use windows_sys::Win32::{
     Foundation::*, Graphics::Gdi::*,
     System::{LibraryLoader::GetModuleHandleW, Threading::CreateMutexW},
@@ -7,6 +7,38 @@ use windows_sys::Win32::{
 };
 
 fn wide(s: &str) -> Vec<u16> { OsStr::new(s).encode_wide().chain(Some(0)).collect() }
+
+fn taskbar_created_message() -> u32 {
+    static MESSAGE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MESSAGE.get_or_init(|| unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) })
+}
+
+/// Keep only our three native UI windows out of the taskbar, including after
+/// Explorer restarts while Orbit Widgets is running with administrator rights.
+pub fn prepare_taskbar_windows() {
+    unsafe {
+        let process_id=windows_sys::Win32::System::Threading::GetCurrentProcessId();
+        let taskbar_created=taskbar_created_message();
+        // Exact titles avoid desktop-wide enumeration on every widget repaint.
+        for title in ["Orbit Widgets", "Orbit Widgets — настройки", "Orbit Widgets — подсказка"] {
+            let hwnd=FindWindowW(null(),wide(title).as_ptr());
+            if hwnd.is_null() { continue; }
+            let mut owner=0;
+            GetWindowThreadProcessId(hwnd,&mut owner);
+            if owner != process_id { continue; }
+            // Winit re-applies skip_taskbar on this payload-free shell message,
+            // but unelevated Explorer cannot deliver it to an elevated window
+            // unless that exact message is allowed for that exact HWND.
+            if taskbar_created != 0 { ChangeWindowMessageFilterEx(hwnd,taskbar_created,MSGFLT_ALLOW,null_mut()); }
+            let style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
+            let hidden_style=(style | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
+            if hidden_style != style {
+                SetWindowLongPtrW(hwnd,GWL_EXSTYLE,hidden_style);
+                SetWindowPos(hwnd,null_mut(),0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Monitor { bounds: RECT, work: RECT, scale: f32, name: String, primary: bool }
@@ -199,11 +231,56 @@ const EXIT_MESSAGE:u32=WM_APP+3;
 const ID_SETTINGS:usize=101;
 const ID_LOCK:usize=102;
 const ID_EXIT:usize=103;
+const TRAY_RETRY_TIMER:usize=1;
+const TRAY_RETRY_INTERVAL_MS:u32=1_000;
+const TRAY_MAX_ATTEMPTS:u32=60;
+
+#[derive(Default)]
+struct TrayRetry { remaining: Cell<u32> }
+
+impl TrayRetry {
+    fn restart(&self) { self.remaining.set(TRAY_MAX_ATTEMPTS); }
+
+    fn attempted(&self, registered: bool) -> bool {
+        let remaining = if registered { 0 } else { self.remaining.get().saturating_sub(1) };
+        self.remaining.set(remaining);
+        remaining != 0
+    }
+}
+
+struct ShellState {
+    signals: Arc<UiSignals>,
+    tray: NOTIFYICONDATAW,
+    taskbar_created: u32,
+    retry: TrayRetry,
+}
+
+unsafe fn register_tray(hwnd: HWND, state: &ShellState) {
+    // TaskbarCreated is also broadcast for some display changes. Modifying an
+    // existing icon makes repeated notifications harmless without duplicating it.
+    let registered = Shell_NotifyIconW(NIM_ADD, &state.tray) != 0
+        || Shell_NotifyIconW(NIM_MODIFY, &state.tray) != 0;
+    if state.retry.attempted(registered) {
+        SetTimer(hwnd, TRAY_RETRY_TIMER, TRAY_RETRY_INTERVAL_MS, None);
+    } else {
+        KillTimer(hwnd, TRAY_RETRY_TIMER);
+    }
+}
 
 unsafe extern "system" fn shell_proc(hwnd:HWND,message:u32,wparam:WPARAM,lparam:LPARAM)->LRESULT {
-    let raw=GetWindowLongPtrW(hwnd,GWLP_USERDATA) as *const UiSignals;
+    let raw=GetWindowLongPtrW(hwnd,GWLP_USERDATA) as *const ShellState;
     if !raw.is_null() {
-        let signals=&*raw;
+        let state=&*raw;
+        let signals=&state.signals;
+        if state.taskbar_created != 0 && message == state.taskbar_created {
+            state.retry.restart();
+            register_tray(hwnd, state);
+            return 0;
+        }
+        if message == WM_TIMER && wparam == TRAY_RETRY_TIMER {
+            register_tray(hwnd, state);
+            return 0;
+        }
         if message==EXIT_MESSAGE {
             signals.exit_requested.store(true,Ordering::Relaxed);
             DestroyWindow(hwnd);
@@ -229,7 +306,7 @@ unsafe extern "system" fn shell_proc(hwnd:HWND,message:u32,wparam:WPARAM,lparam:
             return 0;
         }
     }
-    if message==WM_DESTROY {let mut data:NOTIFYICONDATAW=zeroed();data.cbSize=size_of::<NOTIFYICONDATAW>() as u32;data.hWnd=hwnd;data.uID=1;Shell_NotifyIconW(NIM_DELETE,&data);PostQuitMessage(0);return 0;}
+    if message==WM_DESTROY {KillTimer(hwnd,TRAY_RETRY_TIMER);let mut data:NOTIFYICONDATAW=zeroed();data.cbSize=size_of::<NOTIFYICONDATAW>() as u32;data.hWnd=hwnd;data.uID=1;Shell_NotifyIconW(NIM_DELETE,&data);PostQuitMessage(0);return 0;}
     DefWindowProcW(hwnd,message,wparam,lparam)
 }
 
@@ -238,13 +315,17 @@ pub fn start_shell(signals:Arc<UiSignals>) {
         let instance=GetModuleHandleW(null());let class=wide("OrbitWidgetsShell");
         let wc=WNDCLASSW {lpfnWndProc:Some(shell_proc),hInstance:instance,lpszClassName:class.as_ptr(),..zeroed()};
         if RegisterClassW(&wc)==0 {return;}
-        let hwnd=CreateWindowExW(0,class.as_ptr(),wide("Orbit Widgets control").as_ptr(),0,0,0,0,0,null_mut(),null_mut(),instance,null());
+        // A hidden top-level window receives the shell's TaskbarCreated
+        // broadcast; WS_EX_TOOLWINDOW keeps this control window off the taskbar.
+        let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,class.as_ptr(),wide("Orbit Widgets control").as_ptr(),0,0,0,0,0,null_mut(),null_mut(),instance,null());
         if hwnd.is_null(){return;}
         // A normal shortcut may request settings from an elevated instance.
-        // Only our payload-free settings message is allowed through UIPI.
+        // These messages have no payload. Explorer normally runs unelevated,
+        // so its registered restart notification also needs a per-window filter.
         ChangeWindowMessageFilterEx(hwnd,OPEN_MESSAGE,MSGFLT_ALLOW,null_mut());
         ChangeWindowMessageFilterEx(hwnd,EXIT_MESSAGE,MSGFLT_ALLOW,null_mut());
-        SetWindowLongPtrW(hwnd,GWLP_USERDATA,Arc::as_ptr(&signals) as isize);
+        let taskbar_created=taskbar_created_message();
+        if taskbar_created != 0 { ChangeWindowMessageFilterEx(hwnd,taskbar_created,MSGFLT_ALLOW,null_mut()); }
         RegisterHotKey(hwnd,1,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,b'O' as u32);
         RegisterHotKey(hwnd,2,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,b'L' as u32);
         let icon_path=std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join("orbit.ico")));
@@ -254,8 +335,40 @@ pub fn start_shell(signals:Arc<UiSignals>) {
         let mut data:NOTIFYICONDATAW=zeroed();data.cbSize=size_of::<NOTIFYICONDATAW>() as u32;data.hWnd=hwnd;data.uID=1;
         data.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;data.uCallbackMessage=TRAY_MESSAGE;data.hIcon=icon;
         let tip=wide("Orbit Widgets · настройки Ctrl+Alt+O");data.szTip[..tip.len()].copy_from_slice(&tip);
-        Shell_NotifyIconW(NIM_ADD,&data);
+        // Keep the icon and signals alive for the entire message loop. A delayed
+        // Explorer startup is retried without polling once registration succeeds.
+        let state=Box::new(ShellState { signals, tray:data, taskbar_created, retry:TrayRetry::default() });
+        SetWindowLongPtrW(hwnd,GWLP_USERDATA,state.as_ref() as *const ShellState as isize);
+        state.retry.restart();
+        register_tray(hwnd,&state);
         let mut message:MSG=zeroed();while GetMessageW(&mut message,null_mut(),0,0)>0 {TranslateMessage(&message);DispatchMessageW(&message);}
         UnregisterHotKey(hwnd,1);UnregisterHotKey(hwnd,2);
+        if IsWindow(hwnd) != 0 { DestroyWindow(hwnd); }
     });
+}
+
+#[cfg(test)]
+mod tray_tests {
+    use super::{TrayRetry, TRAY_MAX_ATTEMPTS};
+
+    #[test]
+    fn absent_explorer_is_retried_only_for_a_bounded_period() {
+        let retry=TrayRetry::default();
+        retry.restart();
+        for _ in 1..TRAY_MAX_ATTEMPTS { assert!(retry.attempted(false)); }
+        assert!(!retry.attempted(false));
+        assert!(!retry.attempted(false));
+    }
+
+    #[test]
+    fn successful_add_stops_retrying_and_a_shell_restart_gets_a_fresh_budget() {
+        let retry=TrayRetry::default();
+        retry.restart();
+        assert!(retry.attempted(false));
+        assert!(!retry.attempted(true));
+        assert!(!retry.attempted(false));
+        retry.restart();
+        for _ in 1..TRAY_MAX_ATTEMPTS { assert!(retry.attempted(false)); }
+        assert!(!retry.attempted(false));
+    }
 }

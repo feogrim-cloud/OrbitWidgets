@@ -1,5 +1,35 @@
 # Changelog / Изменения
 
+## 1.1.5 — 2026-10-27
+
+### English
+
+- Added optional used/total dedicated GPU memory inside the existing GPU circle. With load and temperature enabled, the temperature shares the header and memory occupies the lower line.
+- Read memory from the same NVIDIA adapter through optional NVML v2 with a v1 fallback, once per second. Missing data stays unavailable; shared system RAM is excluded. Driver reserve accounting can differ from Windows.
+- Kept compact text within the rings at 80–220 px and added a dedicated memory switch and detailed tooltip.
+
+### Русский
+
+- Добавлена отключаемая строка занятой и общей видеопамяти в существующий круг ГП. При включённых нагрузке и температуре температура размещается рядом с подписью ГП, память — нижней строкой.
+- Видеопамять читается у того же адаптера NVIDIA через NVML v2 с резервным v1 раз в секунду. Недоступный датчик остаётся недоступным; общая память из ОЗУ не включается. Учёт резерва драйвера может отличаться от Windows.
+- Текст укладывается внутри колец при размере 80–220 px; добавлены отдельный переключатель памяти и подробная подсказка.
+
+## 1.1.4 — 2026-10-27
+
+### English
+
+- Restored the notification-area icon after Explorer restarts, including elevated startup, and retry registration during delayed shell startup.
+- Kept widgets, settings and hover windows off the taskbar after shell restarts.
+- GPU load now prefers Windows WDDM counters for the same uniquely identified NVIDIA adapter. Process counters are added within each engine, then the busiest engine is used, following Task Manager's aggregation. NVIDIA remains the temperature source and a labelled load fallback when Windows counters are unavailable.
+- The GPU tooltip identifies the active load source. Genuine readings are not filtered to conceal spikes.
+
+### Русский
+
+- Значок трея восстанавливается после перезапуска Проводника, в том числе при повышенном автозапуске; добавлены повторные попытки при задержке запуска оболочки.
+- Виджеты, настройки и подсказки остаются вне панели задач после перезапуска оболочки.
+- Для нагрузки ГП предпочтительно используются счётчики Windows WDDM того же однозначно определённого адаптера NVIDIA. Показания процессов складываются внутри каждого движка, затем выбирается самый занятый, как в диспетчере задач. NVIDIA остаётся источником температуры и явно обозначенным резервным источником нагрузки при недоступности системных счётчиков.
+- В подсказке ГП указан действующий источник нагрузки. Фильтры для скрытия пиков не применяются.
+
 ## 1.1.3 — 2026-10-26
 
 ### English

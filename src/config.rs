@@ -37,6 +37,7 @@ pub struct Config {
     pub cpu_temp: bool,
     pub gpu_usage: bool,
     pub gpu_temp: bool,
+    pub gpu_memory: bool,
     pub ram: bool,
     pub disks: bool,
     pub hidden_disks: Vec<String>,
@@ -59,7 +60,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self { Self {
-        cpu_usage: true, cpu_temp: true, gpu_usage: true, gpu_temp: true,
+        cpu_usage: true, cpu_temp: true, gpu_usage: true, gpu_temp: true, gpu_memory: true,
         ram: true, disks: true, hidden_disks: Vec::new(), network: true,
         network_adapter: None, network_unit: NetworkUnit::Megabits,
         network_scale_mbps: 100.0, layout: Layout::Vertical, diameter: 128.0,

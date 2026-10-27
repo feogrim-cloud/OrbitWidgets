@@ -245,16 +245,35 @@ impl WidgetApp {
                     percent(m.cpu_usage), temperature(m.cpu_temp), m.temperature_status),
             });
         }
-        if self.config.gpu_usage || self.config.gpu_temp {
+        if self.config.gpu_usage || self.config.gpu_temp || self.config.gpu_memory {
+            let memory_only = !self.config.gpu_usage && !self.config.gpu_temp;
+            let memory = valid_gpu_memory(m.gpu_memory_used, m.gpu_memory_total);
+            let memory_line = memory.map_or_else(|| "ВП: —".into(), |(used, total)| gpu_memory_line(used, total));
+            let label = if self.config.gpu_memory && self.config.gpu_usage && self.config.gpu_temp {
+                format!("ГП {}", temperature(m.gpu_temp).replace(" °C", "°"))
+            } else { "ГП".into() };
+            let memory_tip = if self.config.gpu_memory {
+                memory.map_or_else(|| "\nВидеопамять: датчик недоступен".into(), |(used, total)|
+                    format!("\nВидеопамять: {}\nЗанято {:.1}% выделенной памяти ГП. Общая память из ОЗУ не включена.\nИсточник видеопамяти: {}{}",
+                        gpu_memory_line(used, total), used as f64 / total as f64 * 100.0,
+                        m.gpu_memory_source, ". Учёт служебного резерва может отличаться от Windows."))
+            } else { String::new() };
             gauges.push(Gauge {
-                id: "gpu".into(), label: "ГП".into(),
-                main: if self.config.gpu_usage { percent(m.gpu_usage) } else { temperature(m.gpu_temp) },
-                detail: if self.config.gpu_temp && self.config.gpu_usage { temperature(m.gpu_temp) } else { "графика".into() },
-                outer: if self.config.gpu_usage { normalized(m.gpu_usage, 100.0) } else { None },
+                id: "gpu".into(), label,
+                main: if self.config.gpu_usage { percent(m.gpu_usage) } else if self.config.gpu_temp { temperature(m.gpu_temp) }
+                    else { memory.map_or_else(|| "—".into(), |(used, _)| format!("{:.1}", gib(used)).replace('.', ",")) },
+                detail: if memory_only { memory.map_or_else(|| "видеопамять".into(), |(_, total)| format!("из {} ГБ", memory_total_text(total))) }
+                    else if self.config.gpu_memory { memory_line }
+                    else if self.config.gpu_temp && self.config.gpu_usage { temperature(m.gpu_temp) } else { "графика".into() },
+                outer: if self.config.gpu_usage { normalized(m.gpu_usage, 100.0) }
+                    else if memory_only { memory.and_then(|(used, total)| ratio(used, total)) } else { None },
                 inner: if self.config.gpu_temp { normalized(m.gpu_temp, 100.0) } else { None },
                 accent: p.green, secondary: heat_color(m.gpu_temp, p.orange),
-                tooltip: format!("ГП: {}\nНагрузка: {}\nТемпература: {}\nВнешний контур — нагрузка, внутренний — температура (0–100 °C).",
-                    if m.gpu_name.is_empty() { "ожидание датчика" } else { &m.gpu_name }, percent(m.gpu_usage), temperature(m.gpu_temp)),
+                tooltip: format!("ГП: {}\nНагрузка: {}\nИсточник нагрузки: {}\nТемпература: {}{}\n{}",
+                    if m.gpu_name.is_empty() { "ожидание датчика" } else { &m.gpu_name }, percent(m.gpu_usage),
+                    if m.gpu_usage_source.is_empty() { "ожидание датчика" } else { &m.gpu_usage_source }, temperature(m.gpu_temp), memory_tip,
+                    if memory_only { "Внешний контур — занятая видеопамять." }
+                    else { "Внешний контур — нагрузка, внутренний — температура (0–100 °C)." }),
             });
         }
         if self.config.ram {
@@ -329,7 +348,8 @@ impl WidgetApp {
             if (*value - target).abs() < 0.001 { *value = target; } else { animating = true; }
         }
         // Both tracks stay visible for missing sensors, with an explicit dash in the label.
-        let outer_enabled = match gauge.id.as_str() { "cpu" => self.config.cpu_usage, "gpu" => self.config.gpu_usage, _ => true };
+        let outer_enabled = match gauge.id.as_str() { "cpu" => self.config.cpu_usage,
+            "gpu" => self.config.gpu_usage || (self.config.gpu_memory && !self.config.gpu_temp), _ => true };
         let inner_enabled = match gauge.id.as_str() { "cpu" => self.config.cpu_temp, "gpu" => self.config.gpu_temp, "network" => true, _ => false };
         if outer_enabled {
             paint.circle_stroke(center, radius, Stroke::new(outer_width, alpha(palette.track, opacity)));
@@ -340,13 +360,19 @@ impl WidgetApp {
             if gauge.inner.is_some() { draw_arc(paint, center, inner_radius, smooth[1], inner_width, alpha(gauge.secondary, opacity)); }
         }
         let scale = diameter / 128.0;
-        paint.text(center + Vec2::new(0.0, -27.0 * scale), Align2::CENTER_CENTER, &gauge.label,
-            FontId::proportional((11.0 * scale).max(9.0)), alpha(palette.muted, opacity));
-        let main_font = if gauge.main.chars().count() > 6 { 21.0 } else { 28.0 };
+        let gpu_memory_layout = gauge.id == "gpu" && self.config.gpu_memory;
+        let header_y = if gpu_memory_layout { -25.0 * scale } else { -27.0 * scale };
+        let header_font = if gpu_memory_layout { fitted_gauge_font(paint, &gauge.label, (11.0 * scale).max(9.0), text_chord_width(inner_radius, header_y)) }
+            else { (11.0 * scale).max(9.0) };
+        paint.text(center + Vec2::new(0.0, header_y), Align2::CENTER_CENTER, &gauge.label,
+            FontId::proportional(header_font), alpha(palette.muted, opacity));
+        let main_font = if gauge.main.chars().count() > 6 { 21.0 } else if gpu_memory_layout { 26.0 } else { 28.0 };
         paint.text(center + Vec2::new(0.0, -2.0 * scale), Align2::CENTER_CENTER, &gauge.main,
             FontId::proportional(main_font * scale), alpha(palette.text, opacity));
+        let detail_font = if gpu_memory_layout { fitted_gauge_font(paint, &gauge.detail, (12.0 * scale).max(9.0), text_chord_width(inner_radius, 23.0 * scale)) }
+            else { (12.0 * scale).max(9.0) };
         paint.text(center + Vec2::new(0.0, 23.0 * scale), Align2::CENTER_CENTER, &gauge.detail,
-            FontId::proportional((12.0 * scale).max(9.0)), alpha(if gauge.inner.is_some() { gauge.secondary } else { palette.muted }, opacity));
+            FontId::proportional(detail_font), alpha(if gauge.inner.is_some() && !gpu_memory_layout { gauge.secondary } else { palette.muted }, opacity));
         let hovered = response.hovered() && !response.dragged()
             && ui.input(|input| !input.pointer.any_down())
             && response.hover_pos().is_some_and(|position| position.distance(center) <= radius);
@@ -379,6 +405,7 @@ impl WidgetApp {
                 .with_mouse_passthrough(true).with_always_on_top()
                 .with_position([x, y]).with_inner_size(size),
             |tooltip_ctx, _class| {
+                crate::platform::prepare_taskbar_windows();
                 crate::platform::initialize_tooltip_opacity();
                 let child_pixels_per_point = tooltip_ctx.pixels_per_point();
                 tooltip_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
@@ -408,6 +435,7 @@ impl WidgetApp {
                     ui.checkbox(&mut self.config.ram, "Оперативная память");
                     ui.checkbox(&mut self.config.network, "Сеть · приём и отдача"); ui.end_row();
                 });
+                ui.checkbox(&mut self.config.gpu_memory, "ГП · видеопамять");
                 ui.checkbox(&mut self.config.disks, "Диски по буквам");
                 if self.config.disks {
                     ui.horizontal_wrapped(|ui| {
@@ -506,6 +534,7 @@ impl WidgetApp {
 
 impl eframe::App for WidgetApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::platform::prepare_taskbar_windows();
         let startup_result = self.startup_rx.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(outcome) => Some(outcome),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -597,8 +626,9 @@ impl eframe::App for WidgetApp {
             let mut closed = false;
             ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("orbit-settings"),
                 egui::ViewportBuilder::default().with_title("Orbit Widgets — настройки").with_inner_size([470.0, 750.0])
-                    .with_min_inner_size([410.0, 480.0]).with_decorations(true).with_transparent(false).with_always_on_top(),
+                    .with_min_inner_size([410.0, 480.0]).with_decorations(true).with_transparent(false).with_always_on_top().with_taskbar(false),
                 |settings_ctx, _class| {
+                    crate::platform::prepare_taskbar_windows();
                     closed = settings_ctx.input(|i| i.viewport().close_requested());
                     self.settings_ui(settings_ctx);
                 });
@@ -635,6 +665,25 @@ fn draw_arc(painter: &egui::Painter, center: Pos2, radius: f32, fraction: f32, w
 }
 
 fn alpha(color: Color32, opacity: f32) -> Color32 { color.gamma_multiply(opacity) }
+fn valid_gpu_memory(used: Option<u64>, total: Option<u64>) -> Option<(u64, u64)> {
+    used.zip(total).filter(|(used, total)| *total > 0 && used <= total)
+}
+fn memory_total_text(total: u64) -> String {
+    format!("{:.1}", gib(total)).trim_end_matches('0').trim_end_matches('.').replace('.', ",")
+}
+fn gpu_memory_line(used: u64, total: u64) -> String {
+    format!("{:.1} / {} ГБ", gib(used), memory_total_text(total)).replace('.', ",")
+}
+fn text_chord_width(radius: f32, y: f32) -> f32 {
+    (2.0 * ((radius - 2.0).powi(2) - (y.abs() + 4.0).powi(2)).max(0.0).sqrt()).max(24.0)
+}
+fn fitted_gauge_font(paint: &egui::Painter, text: &str, preferred: f32, width: f32) -> f32 {
+    let mut font = preferred;
+    while font > 7.0 && paint.layout_no_wrap(text.into(), FontId::proportional(font), Color32::WHITE).size().x > width {
+        font = (font - 0.25).max(7.0);
+    }
+    font
+}
 fn normalized(value: Option<f32>, max: f32) -> Option<f32> { value.filter(|v| v.is_finite()).map(|v| (v / max).clamp(0.0, 1.0)) }
 fn ratio(used: u64, total: u64) -> Option<f32> { (total > 0).then_some((used as f64 / total.max(1) as f64).clamp(0.0, 1.0) as f32) }
 fn percent(value: Option<f32>) -> String { value.filter(|v| v.is_finite()).map_or_else(|| "—".into(), |v| format!("{:.0}%", v.clamp(0.0, 100.0))) }
@@ -651,18 +700,18 @@ pub mod gallery {
     use crate::model::DiskMetric;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Scene { HeroHorizontal, ThemeLight, Vertical, Settings }
+    pub enum Scene { HeroHorizontal, ThemeLight, Vertical, Settings, GpuMemory }
 
     impl Scene {
         pub fn parse(name: &str) -> Option<Self> { match name {
             "hero-horizontal" | "horizontal-neon" => Some(Self::HeroHorizontal),
             "theme-light" | "horizontal-light" => Some(Self::ThemeLight),
-            "vertical" => Some(Self::Vertical), "settings" => Some(Self::Settings), _ => None,
+            "vertical" => Some(Self::Vertical), "settings" => Some(Self::Settings), "gpu-memory" => Some(Self::GpuMemory), _ => None,
         }}
 
         pub fn canvas(self) -> [f32; 2] { match self {
             Self::HeroHorizontal | Self::ThemeLight => [900.0, 200.0],
-            Self::Vertical => [420.0, 800.0], Self::Settings => [520.0, 980.0],
+            Self::Vertical => [420.0, 800.0], Self::Settings => [520.0, 980.0], Self::GpuMemory => [320.0, 190.0],
         }}
     }
 
@@ -679,11 +728,16 @@ pub mod gallery {
             config.monitor_index = 1;
             config.anchor = Anchor::MiddleRight;
             config.margin = 10.0;
+            if scene == Scene::GpuMemory {
+                config.cpu_usage = false; config.cpu_temp = false; config.ram = false; config.disks = false; config.network = false;
+            }
             let gib = 1_073_741_824_u64;
             let metrics = Metrics {
                 cpu_usage: Some(37.0), cpu_temp: Some(62.0),
                 gpu_usage: Some(54.0), gpu_temp: Some(66.0),
                 gpu_name: "NVIDIA GeForce RTX 3060".into(),
+                gpu_memory_used: Some((3.4 * gib as f64) as u64), gpu_memory_total: Some(12 * gib),
+                gpu_memory_source: "NVIDIA NVML v2".into(),
                 ram_used: (12.8 * gib as f64) as u64, ram_total: 32 * gib,
                 disks: vec![DiskMetric { mount: "C:\\".into(), used: 186 * gib, total: 476 * gib },
                     DiskMetric { mount: "D:\\".into(), used: 742 * gib, total: 1000 * gib }],
@@ -691,6 +745,7 @@ pub mod gallery {
                 network_name: "Ethernet".into(), network_interfaces: vec!["Ethernet".into(), "Wi-Fi".into()],
                 temperature_status: "Температура ЦП: MSI Afterburner, общая память".into(),
                 sensor_helper_running: false,
+                ..Metrics::default()
             };
             let (_snapshots, rx) = mpsc::channel();
             let (commands, _command_rx) = mpsc::channel();
@@ -714,7 +769,19 @@ pub mod gallery {
             ctx.set_pixels_per_point(1.0);
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.scene.canvas().into()));
             ctx.set_visuals(if self.app.config.theme == Theme::Light { egui::Visuals::light() } else { egui::Visuals::dark() });
-            if self.scene == Scene::Settings {
+            if self.scene == Scene::GpuMemory {
+                let palette = Palette::new(self.app.config.theme);
+                let gauges = self.app.gauges(palette);
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                    if let Some(gauge) = gauges.first() {
+                        for (x, diameter) in [(28.0, 83.0), (155.0, 128.0)] {
+                            let min = Pos2::new(x, 95.0 - diameter / 2.0);
+                            let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), gauge, palette, 1.0 / 60.0);
+                            ui.painter().text(Pos2::new(x + diameter/2.0, 173.0), Align2::CENTER_CENTER, format!("{diameter:.0} px"), FontId::proportional(11.0), palette.muted);
+                        }
+                    }
+                });
+            } else if self.scene == Scene::Settings {
                 self.app.settings_ui(ctx);
             } else {
                 let palette = Palette::new(self.app.config.theme);
@@ -754,6 +821,33 @@ pub mod gallery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_memory_format_preserves_gib_units_and_unknown_values() {
+        assert_eq!(gpu_memory_line((3.4 * 1_073_741_824.0) as u64, 12 * 1_073_741_824), "3,4 / 12 ГБ");
+        assert_eq!(valid_gpu_memory(None, Some(12)), None);
+        assert_eq!(valid_gpu_memory(Some(0), Some(0)), None);
+        assert_eq!(valid_gpu_memory(Some(13), Some(12)), None);
+        assert_eq!(valid_gpu_memory(Some(0), Some(12)), Some((0, 12)));
+    }
+
+    #[test]
+    fn gpu_memory_header_and_detail_fit_a_compact_circle() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            for diameter in [80.0_f32, 83.0, 128.0, 220.0] {
+                let scale = diameter / 128.0;
+                let radius = diameter / 2.0 - 4.0 - (diameter * 0.043).clamp(3.5, 8.0) - diameter * 0.032;
+                let paint = ctx.layer_painter(egui::LayerId::background());
+                for (text, preferred, y) in [("ГП 100°", (11.0*scale).max(9.0), -25.0*scale), ("11,9 / 12 ГБ", (12.0*scale).max(9.0), 23.0*scale)] {
+                    let width = text_chord_width(radius, y);
+                    let font = fitted_gauge_font(&paint, text, preferred, width);
+                    let galley = paint.layout_no_wrap(text.into(), FontId::proportional(font), Color32::WHITE);
+                    assert!(galley.size().x <= width + 1.0, "{diameter}: {text}");
+                }
+            }
+        });
+    }
 
     #[test]
     fn large_widget_set_fits_both_orientations_on_small_display() {
