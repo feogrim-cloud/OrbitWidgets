@@ -2,6 +2,7 @@
 // assembly is loaded from this helper's directory; no SDK is required at runtime.
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -24,19 +25,31 @@ internal static class Program
         public double? GpuUsage;
         public string GpuName = "";
         public int CpuScore = -1;
-        public int GpuTempScore = -1;
-        public int GpuLoadScore = -1;
+        public readonly List<GpuSample> Gpus = new List<GpuSample>();
+    }
+
+    private sealed class GpuSample
+    {
+        public string Name = "";
+        public string Identifier = "";
+        public double? Temperature;
+        public double? Usage;
+        public int TempScore = -1;
+        public int LoadScore = -1;
     }
 
     private static int Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(false);
         bool once = false;
+        string requestedGpuName = null;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] == "--once") once = true;
             if (args[i] == "--parent" && i + 1 < args.Length)
                 Int32.TryParse(args[++i], out parentId);
+            if (args[i] == "--gpu-name")
+                requestedGpuName = i + 1 < args.Length ? Identity(args[++i]) : "";
         }
         AppDomain.CurrentDomain.AssemblyResolve += ResolveLocalAssembly;
         object computer = null;
@@ -72,10 +85,8 @@ internal static class Program
                 Stopwatch interval = Stopwatch.StartNew();
                 try
                 {
-                    Sample sample = new Sample();
                     IEnumerable hardware = Get(computer, "Hardware") as IEnumerable;
-                    if (hardware != null)
-                        foreach (object item in hardware) ReadHardware(item, sample);
+                    Sample sample = ReadSample(hardware, requestedGpuName);
                     string status = sample.CpuTemp.HasValue
                         ? "Температура ЦП доступна"
                         : (pawnIoInstalled == false
@@ -90,8 +101,8 @@ internal static class Program
                     Emit(new Sample(), "Ошибка чтения датчиков: " + ErrorMessage(error));
                 }
                 if (once) break;
-                // The helper updates hardware at 1 Hz; main CPU and network use
-                // a separate 500 ms collector and cannot be held up by this work.
+                // Both collectors sample at 1 Hz; main CPU and network use
+                // a separate worker and cannot be held up by this work.
                 int wait = Math.Max(0, 1000 - (int)interval.ElapsedMilliseconds);
                 if (wait > 0) Thread.Sleep(wait);
             } while (true);
@@ -116,26 +127,70 @@ internal static class Program
         return File.Exists(path) ? Assembly.LoadFrom(path) : null;
     }
 
-    private static void ReadHardware(object hardware, Sample sample)
+    private static Sample ReadSample(IEnumerable hardware, string requestedGpuName)
     {
-        try { Invoke(hardware, "Update"); } catch { }
-        string type = Convert.ToString(Get(hardware, "HardwareType"), Invariant);
+        Sample sample = new Sample();
+        if (hardware != null)
+            foreach (object item in hardware) ReadHardware(item, sample, null);
+        SelectGpu(sample, requestedGpuName);
+        return sample;
+    }
+
+    private static void ReadHardware(object hardware, Sample sample, GpuSample parentGpu)
+    {
+        if (hardware == null) return;
+        string type;
+        try { type = Convert.ToString(Get(hardware, "HardwareType"), Invariant) ?? ""; }
+        catch { return; }
         bool cpu = String.Equals(type, "Cpu", StringComparison.OrdinalIgnoreCase);
         bool gpu = type.StartsWith("Gpu", StringComparison.OrdinalIgnoreCase);
-        string gpuName = Convert.ToString(Get(hardware, "Name"), Invariant);
-        if (gpu && String.IsNullOrEmpty(sample.GpuName)) sample.GpuName = gpuName;
-        IEnumerable sensors = Get(hardware, "Sensors") as IEnumerable;
+        GpuSample adapter = cpu ? null : parentGpu;
+        if (gpu)
+        {
+            // Keep an unavailable adapter in the identity list as well: a
+            // failed update of one of two identically named GPUs must not
+            // turn a formerly ambiguous requested name into a false match.
+            string gpuName = "", gpuIdentifier = "";
+            try
+            {
+                gpuName = Identity(Convert.ToString(Get(hardware, "Name"), Invariant));
+                gpuIdentifier = Identity(Convert.ToString(Get(hardware, "Identifier"), Invariant));
+            }
+            catch { }
+            if (adapter == null || !SameGpuSubtree(adapter.Identifier, gpuIdentifier))
+            {
+                adapter = new GpuSample { Name = gpuName, Identifier = gpuIdentifier };
+                sample.Gpus.Add(adapter);
+            }
+        }
+        // Sensor.Value can retain the preceding successful update. A failed
+        // hardware update invalidates this whole subtree for the current sample.
+        try
+        {
+            MethodInfo update = hardware.GetType().GetMethod("Update", Type.EmptyTypes);
+            if (update == null) return;
+            update.Invoke(hardware, null);
+        }
+        catch { return; }
+        IEnumerable sensors = null;
+        try { sensors = Get(hardware, "Sensors") as IEnumerable; } catch { }
         if (sensors != null)
         {
             foreach (object sensor in sensors)
             {
-                object raw = Get(sensor, "Value");
+                object raw;
+                string sensorType, name;
+                try
+                {
+                    raw = Get(sensor, "Value");
+                    sensorType = Convert.ToString(Get(sensor, "SensorType"), Invariant) ?? "";
+                    name = (Convert.ToString(Get(sensor, "Name"), Invariant) ?? "").ToLowerInvariant();
+                }
+                catch { continue; }
                 if (raw == null) continue;
                 double value;
                 try { value = Convert.ToDouble(raw, Invariant); } catch { continue; }
                 if (Double.IsNaN(value) || Double.IsInfinity(value)) continue;
-                string sensorType = Convert.ToString(Get(sensor, "SensorType"), Invariant);
-                string name = Convert.ToString(Get(sensor, "Name"), Invariant).ToLowerInvariant();
                 // A missing PawnIO driver can surface as a zero-value CPU
                 // sensor. Zero is unavailable on this desktop, not a reading.
                 if (sensorType == "Temperature" && value > 1 && value < 150)
@@ -149,32 +204,87 @@ internal static class Program
                             sample.CpuTemp = value;
                         }
                     }
-                    if (gpu)
+                    if (adapter != null)
                     {
                         int score = GpuTemperatureScore(name);
-                        if (score > sample.GpuTempScore)
+                        if (score > adapter.TempScore)
                         {
-                            sample.GpuTempScore = score;
-                            sample.GpuTemp = value;
-                            sample.GpuName = gpuName;
+                            adapter.TempScore = score;
+                            adapter.Temperature = value;
                         }
                     }
                 }
-                if (gpu && sensorType == "Load" && value >= 0 && value <= 100)
+                if (adapter != null && sensorType == "Load" && value >= 0 && value <= 100)
                 {
                     int score = name == "gpu core" ? 100 : (name == "d3d 3d" ? 90 : (name == "gpu total" ? 80 : -1));
-                    if (score > sample.GpuLoadScore)
+                    if (score > adapter.LoadScore)
                     {
-                        sample.GpuLoadScore = score;
-                        sample.GpuUsage = value;
-                        sample.GpuName = gpuName;
+                        adapter.LoadScore = score;
+                        adapter.Usage = value;
                     }
                 }
             }
         }
-        IEnumerable children = Get(hardware, "SubHardware") as IEnumerable;
+        IEnumerable children = null;
+        try { children = Get(hardware, "SubHardware") as IEnumerable; } catch { }
         if (children != null)
-            foreach (object child in children) ReadHardware(child, sample);
+            foreach (object child in children) ReadHardware(child, sample, adapter);
+    }
+
+    private static string Identity(string value)
+    {
+        if (value == null || value.Length > 512) return "";
+        return value.Trim();
+    }
+
+    private static string GpuKey(GpuSample gpu)
+    {
+        return gpu.Identifier + "\n" + gpu.Name;
+    }
+
+    private static bool SameGpuSubtree(string parent, string child)
+    {
+        if (parent.Length == 0 || child.Length == 0) return false;
+        return String.Equals(parent, child, StringComparison.OrdinalIgnoreCase)
+            || child.StartsWith(parent.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void SelectGpu(Sample sample, string requestedGpuName)
+    {
+        GpuSample selected = null;
+        if (requestedGpuName != null)
+        {
+            string requested = Identity(requestedGpuName);
+            if (requested.Length == 0) return;
+            foreach (GpuSample gpu in sample.Gpus)
+            {
+                if (!String.Equals(gpu.Name, requested, StringComparison.OrdinalIgnoreCase)) continue;
+                if (selected != null) return; // A name cannot identify two physical adapters.
+                selected = gpu;
+            }
+        }
+        else
+        {
+            // Identity, not changing load/temperature scores, chooses a default.
+            // Losing a reading therefore does not silently switch adapters.
+            foreach (GpuSample gpu in sample.Gpus)
+            {
+                if (gpu.Name.Length == 0) continue;
+                if (selected == null || StringComparer.OrdinalIgnoreCase.Compare(GpuKey(gpu), GpuKey(selected)) < 0)
+                    selected = gpu;
+            }
+            if (selected != null)
+            {
+                int matches = 0;
+                foreach (GpuSample gpu in sample.Gpus)
+                    if (String.Equals(GpuKey(gpu), GpuKey(selected), StringComparison.OrdinalIgnoreCase)) matches++;
+                if (matches != 1) return;
+            }
+        }
+        if (selected == null) return;
+        sample.GpuName = selected.Name;
+        sample.GpuTemp = selected.Temperature;
+        sample.GpuUsage = selected.Usage;
     }
 
     private static int CpuTemperatureScore(string name)

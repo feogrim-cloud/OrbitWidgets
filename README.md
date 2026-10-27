@@ -49,7 +49,7 @@ Windows x86, Windows ARM64 and Linux packages are not provided. There is no auto
 ## Features
 
 - **CPU and GPU:** load on the outer ring, temperature on the inner ring. The Russian GPU label is **ГП**.
-- **Memory:** occupied percentage in the header, used RAM in the center, total capacity below it and available physical memory on the bottom line of the same circle. The outer ring shows occupied memory; the tooltip also lists all capacities with units. Available memory includes the reclaimable part of the Windows cache. All RAM values use the same snapshot, updated every 500 ms.
+- **Memory:** occupied percentage in the header, used RAM in the center, total capacity below it and available physical memory on the bottom line of the same circle. The outer ring shows occupied memory; the tooltip also lists all capacities with units. Available memory includes the reclaimable part of the Windows cache. All RAM values use the same snapshot, updated once per second.
 - **Drives:** a **Объём / Скорость** (Capacity / Speed) switch for occupied/total capacity or current read/write speeds per drive letter, with individual visibility switches. The outer ring always shows occupied space; in Speed mode the inner ring shows combined read/write throughput against an adjustable scale, initially 1000 MB/s. This scale is not a disk utilization percentage.
 - **Network:** current receive and send traffic in **Mbit/s or MB/s**, automatic Ethernet/Wi-Fi selection or a chosen adapter, and an adjustable ring scale. This is adapter traffic, including local-network transfers; it is not an Internet speed test.
 - Independent switches for load, temperature, memory, drives and network.
@@ -76,7 +76,7 @@ A new profile places the widgets vertically at the **right-center of a secondary
 | Open Settings | Right-click any circle, or use the notification-area icon |
 | Exit | Notification-area menu → **Выход** |
 
-CPU/GPU load, memory and network are sampled every **500 ms**. The sensor helper and drive read/write speeds update **once a second**; drive space updates every five seconds. Drive speeds come from Windows LogicalDisk performance counters. An unavailable speed appears as **—**, while an idle drive can report zero. Ring motion is smoothed independently of sampling. RAM and drive capacities use binary gigabytes (1024³ bytes), displayed as **ГБ**; drive and network speeds use decimal megabytes of 1,000,000 bytes, and 1 MB/s equals 8 Mbit/s.
+CPU/GPU load and temperature, video memory, RAM, network and drive read/write speeds are sampled **once per second**; drive space updates every five seconds. Drive speeds come from Windows LogicalDisk performance counters. An unavailable speed appears as **—**, while an idle drive can report zero. Ring motion is smoothed independently of sampling. RAM and drive capacities use binary gigabytes (1024³ bytes), displayed as **ГБ**; drive and network speeds use decimal megabytes of 1,000,000 bytes, and 1 MB/s equals 8 Mbit/s.
 
 In Settings, enable **Диски по буквам** and choose **Объём** or **Скорость**. Speed mode uses **↓** for reading and **↑** for writing; hover over a circle for capacity and both speeds. Existing profiles retain Capacity mode and their selected drive visibility until you change them.
 
@@ -95,11 +95,17 @@ The recommended installer configuration includes the official signed **PawnIO 2.
 
 An unavailable sensor is shown as **—**, rather than a fabricated zero. Other metrics remain usable when a temperature sensor is missing. Exact third-party sources, hashes and notices are listed in [SENSOR-SOURCES.txt](build-assets/SENSOR-SOURCES.txt).
 
+In 1.1.8, stale GPU values are cleared from the circle header and tooltip as well as the main reading. A failed helper refresh cannot reuse cached hardware values, and fallback GPU values belong to one uniquely selected adapter. The helper is restarted after ten seconds without valid output; NVIDIA NVML connections are retried every thirty seconds after a failure. **Обновить поиск датчиков** (Refresh sensor search) also reconnects NVML immediately.
+
 ## Startup, settings and updates
 
 In Settings, **Запуск → Запускать при входе в Windows** enables startup at sign-in. **С правами администратора** requests elevated startup. Windows may ask for administrator confirmation when this setting changes. The task runs in the current user's interactive session after a ten-second delay; no password is stored. Enabling startup does not change the privileges of the already running instance.
 
+Elevated startup requires an installation inside the Windows-resolved **Program Files** folder with protected ownership and file permissions. Use the installer for this mode. Ordinary portable use and non-elevated portable startup remain available. See [security behavior](SECURITY.md) for the installation checks and sensor-process safeguards.
+
 Settings are stored locally at `%LOCALAPPDATA%\Orbit Widgets\settings.json`, with a last-good copy in `settings.json.bak`. Changes are saved automatically; a damaged primary file is recovered from the backup. The application does not send monitoring readings to an Internet service. Portable and installed copies use this same current-user profile by default.
+
+Version 1.1.8 keeps the settings schema and display controls unchanged, including metric switches, size, theme, opacity, monitor and placement.
 
 To update, close Orbit Widgets and install the new version, or replace the complete portable application folder with the new package. Keep your settings file. If a portable copy uses startup, keep its path stable or disable startup in the old copy and enable it again from the new location. The installer preserves the settings and does not remove the shared PawnIO driver when uninstalling the application.
 

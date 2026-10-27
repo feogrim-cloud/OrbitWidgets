@@ -150,14 +150,14 @@ type CollectQuery = unsafe extern "system" fn(isize) -> u32;
 type CounterArray = unsafe extern "system" fn(isize, u32, *mut u32, *mut u32, *mut CounterItem) -> u32;
 type CloseQuery = unsafe extern "system" fn(isize) -> u32;
 
-fn system_dll(name: &str) -> PathBuf {
-    std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| "C:\\Windows".into()).join("System32").join(name)
+fn system_dll(name: &str) -> Option<PathBuf> {
+    Some(crate::windows_paths::system_directory()?.join(name))
 }
 
 struct PdhApi { _library: Library, open: OpenQuery, add: AddCounter, collect: CollectQuery, array: CounterArray, close: CloseQuery }
 impl PdhApi {
     fn open() -> Option<Self> { unsafe {
-        let library = Library::new(system_dll("pdh.dll")).ok()?;
+        let library = Library::new(system_dll("pdh.dll")?).ok()?;
         let open = *library.get(b"PdhOpenQueryW\0").ok()?;
         let add = *library.get(b"PdhAddEnglishCounterW\0").ok()?;
         let collect = *library.get(b"PdhCollectQueryData\0").ok()?;
@@ -190,7 +190,7 @@ fn enumerate_adapters() -> Option<Vec<Adapter>> { unsafe {
     // positions follow the SDK inheritance layout (IUnknown + IDXGIObject).
     let iid = windows_sys::core::GUID { data1: 0x770aae78, data2: 0xf26f, data3: 0x4dba,
         data4: [0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87] };
-    let library = Library::new(system_dll("dxgi.dll")).ok()?;
+    let library = Library::new(system_dll("dxgi.dll")?).ok()?;
     let create: unsafe extern "system" fn(*const windows_sys::core::GUID, *mut *mut c_void) -> i32 = *library.get(b"CreateDXGIFactory1\0").ok()?;
     let mut raw = null_mut();
     if create(&iid, &mut raw) < 0 || raw.is_null() { return None; }

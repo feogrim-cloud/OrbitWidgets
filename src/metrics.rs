@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::{
     collections::HashMap,
     ffi::{c_char, c_void, CStr},
-    io::{BufRead, BufReader},
+    io::{self, BufRead, BufReader},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex},
@@ -14,7 +14,10 @@ use std::{
 };
 use sysinfo::{MemoryRefreshKind, System};
 
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const SENSOR_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const HELPER_OUTPUT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SENSOR_RECORD_BYTES: usize = 16_384;
 
 /// One collector serves every widget; no process enumeration or polling in UI.
 pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
@@ -24,11 +27,12 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
         let mut system = System::new();
         system.refresh_cpu_usage();
         let mut gpu = Nvml::open();
+        let mut last_nvml_attempt = Some(Instant::now());
         let mut windows_gpu = gpu.as_ref().filter(|device| device.single_device)
             .and_then(|device| WindowsGpuUsage::open_for_name(&device.name));
         let mut last_windows_attempt = gpu.as_ref().map(|_| Instant::now());
         let mut shared_cpu = SharedCpuTemperature::default();
-        let helper_state = Arc::new(Mutex::new(HelperState::default()));
+        let mut helper_status = "Температура ЦП: модуль датчиков не запущен".to_owned();
         // Reuse an already-running sensor provider before starting another
         // process. NVML plus a fresh MAHM CPU value cover this desktop fully.
         let mut last_helper_attempt = None;
@@ -36,8 +40,9 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
             None
         } else {
             last_helper_attempt = Some(Instant::now());
-            SensorHelper::launch(helper_state.clone())
+            launch_helper(gpu.as_ref().map(|device| device.name.as_str()), &mut helper_status)
         };
+        let mut refresh_helper = false;
         let mut network = NetworkSampler::default();
         let mut selected_network = None;
         let (disk_tx, disk_rx) = mpsc::channel();
@@ -69,13 +74,20 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
                 match command {
                     MonitorCommand::SelectNetwork(name) => selected_network = name,
                     MonitorCommand::RefreshSensors => {
-                        drop(helper.take());
-                        if let Ok(mut state) = helper_state.lock() { *state = HelperState::default(); }
-                        last_helper_attempt = Some(Instant::now());
-                        helper = SensorHelper::launch(helper_state.clone());
+                        // Recreate native handles as well as the fallback. A
+                        // transient NVML initialization/device failure must not
+                        // disable VRAM until the whole application restarts.
+                        gpu = None;
+                        last_nvml_attempt = None;
+                        windows_gpu = None;
+                        last_windows_attempt = None;
+                        refresh_helper = true;
+                        if let Some(child) = helper.as_mut() { child.request_stop("Перезапуск модуля датчиков"); }
                     }
                 }
             }
+            let now = Instant::now();
+            try_reopen(&mut gpu, &mut last_nvml_attempt, now, SENSOR_RETRY_INTERVAL, Nvml::open);
             system.refresh_cpu_usage();
             system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
             // sysinfo's Windows backend obtains total and available physical
@@ -89,7 +101,14 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
                 for disk in &mut disks { disk.read_bps = None; disk.write_bps = None; }
             }
             if let Some(child) = helper.as_mut() {
-                child.check_exit(&helper_state);
+                child.poll(now);
+                if child.should_restart(now) { child.request_stop("Модуль датчиков не отвечает. Повторное подключение…"); }
+            }
+            if helper.as_ref().is_some_and(|child| !child.alive) {
+                if let Some(child) = helper.take() {
+                    let status = child.state.lock().ok().map(|state| state.status.clone());
+                    if let Some(status) = status { helper_status = status; }
+                }
             }
             let net = network.sample(selected_network.as_deref());
             let mut metric = Metrics {
@@ -105,6 +124,7 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
                 ..Metrics::default()
             };
             if let Some(nvml) = gpu.as_mut() {
+                nvml.health.begin_sample();
                 metric.gpu_name = nvml.name.clone();
                 metric.gpu_usage = nvml.utilization();
                 metric.gpu_usage_nvml = metric.gpu_usage;
@@ -115,12 +135,25 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
                     metric.gpu_memory_total = Some(memory.total);
                     metric.gpu_memory_source = format!("NVIDIA NVML v{}", memory.api_version);
                 }
+                nvml.health.finish_sample();
+                if nvml.health.needs_reopen() {
+                    // Do not publish a cached temperature or memory sample
+                    // from a device handle that has just been lost.
+                    metric.gpu_usage = None; metric.gpu_usage_nvml = None;
+                    metric.gpu_usage_source.clear(); metric.gpu_temp = None;
+                    metric.gpu_memory_used = None; metric.gpu_memory_total = None;
+                    metric.gpu_memory_source.clear();
+                    gpu = None;
+                    last_nvml_attempt = Some(now);
+                }
             }
-            if let Ok(state) = helper_state.lock() {
+            metric.temperature_status = helper_status.clone();
+            if let Some(child) = helper.as_ref() {
+            if let Ok(state) = child.state.lock() {
                 let fresh = state.updated.map(|t| t.elapsed() < Duration::from_secs(4)).unwrap_or(false);
-                metric.sensor_helper_running = helper.as_ref().map(|h| h.alive).unwrap_or(false);
+                metric.sensor_helper_running = child.alive && !child.stopping;
                 metric.temperature_status = state.status.clone();
-                if fresh {
+                if fresh && metric.sensor_helper_running {
                     metric.cpu_temp = valid_temperature(state.data.cpu_temp);
                     let same_gpu = metric.gpu_name.is_empty() || same_adapter_name(&metric.gpu_name, &state.data.gpu_name);
                     if same_gpu && metric.gpu_usage.is_none() {
@@ -132,6 +165,7 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
                 } else if state.updated.is_some() && metric.sensor_helper_running {
                     metric.temperature_status = "Датчики временно не отвечают".into();
                 }
+            }
             }
             // Never take load from an unrelated active GPU. DXGI must provide
             // a unique exact hardware-name match for the temperature adapter.
@@ -166,11 +200,13 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
             }
             let helper_running = helper.as_ref().is_some_and(|h| h.alive);
             let missing_sensor = metric.cpu_temp.is_none() || metric.gpu_usage.is_none() || metric.gpu_temp.is_none();
-            if missing_sensor && !helper_running
-                && last_helper_attempt.map_or(true, |time: Instant| time.elapsed() >= Duration::from_secs(30)) {
-                drop(helper.take());
+            if (missing_sensor || refresh_helper) && !helper_running
+                && (refresh_helper || retry_due(last_helper_attempt, now, SENSOR_RETRY_INTERVAL)) {
+                // No replacement is launched while an old owned process is
+                // still terminating, even if its stdout reader already failed.
                 last_helper_attempt = Some(Instant::now());
-                helper = SensorHelper::launch(helper_state.clone());
+                helper = launch_helper(gpu.as_ref().map(|device| device.name.as_str()), &mut helper_status);
+                refresh_helper = false;
             }
             if snapshot_tx.send(metric).is_err() { break; }
         }
@@ -186,6 +222,14 @@ fn finite_percent(value: f32) -> Option<f32> {
 
 fn valid_ram_available(total: u64, available: u64) -> Option<u64> {
     (total > 0 && available <= total).then_some(available)
+}
+
+fn retry_due(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    last.is_none_or(|time| now.saturating_duration_since(time) >= interval)
+}
+
+fn try_reopen<T>(value: &mut Option<T>, last: &mut Option<Instant>, now: Instant, interval: Duration, open: impl FnOnce() -> Option<T>) {
+    if value.is_none() && retry_due(*last, now, interval) { *last = Some(now); *value = open(); }
 }
 
 fn valid_temperature(value: Option<f32>) -> Option<f32> {
@@ -207,77 +251,171 @@ struct HelperState {
     data: SensorData,
     updated: Option<Instant>,
     status: String,
+    reader_failed: bool,
 }
 
 impl Default for HelperState {
     fn default() -> Self {
-        Self { data: SensorData::default(), updated: None, status: "Температура ЦП: модуль датчиков не запущен".into() }
+        Self { data: SensorData::default(), updated: None, status: "Подключение датчиков…".into(), reader_failed: false }
     }
 }
 
-struct SensorHelper { child: Child, alive: bool }
+fn launch_helper(gpu_name: Option<&str>, status: &mut String) -> Option<SensorHelper> {
+    match SensorHelper::launch(gpu_name) {
+        Ok(helper) => { *status = "Подключение датчиков…".into(); Some(helper) }
+        Err(error) => { *status = error; None }
+    }
+}
+
+/// Read at most one bounded record. The pipe buffer and this record are both
+/// bounded even when a broken provider never writes a newline.
+fn read_sensor_record(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
+    let mut record = Vec::new();
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() { return Ok((!record.is_empty()).then_some(record)); }
+        let newline = buffer.iter().position(|&byte| byte == b'\n');
+        let length = newline.unwrap_or(buffer.len());
+        if length > MAX_SENSOR_RECORD_BYTES.saturating_sub(record.len()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Строка модуля датчиков превышает 16 КиБ"));
+        }
+        record.extend_from_slice(&buffer[..length]);
+        reader.consume(length + usize::from(newline.is_some()));
+        if newline.is_some() {
+            if record.last() == Some(&b'\r') { record.pop(); }
+            return Ok(Some(record));
+        }
+    }
+}
+
+fn fail_helper_reader(state: &Mutex<HelperState>, message: String) {
+    if let Ok(mut state) = state.lock() {
+        state.data = SensorData::default(); state.updated = None;
+        state.reader_failed = true; state.status = message;
+    }
+}
+
+fn receive_helper(mut reader: impl BufRead, state: &Mutex<HelperState>) {
+    loop {
+        let record = match read_sensor_record(&mut reader) {
+            Ok(Some(record)) if !record.is_empty() => record,
+            Ok(Some(_)) => continue,
+            Ok(None) => { fail_helper_reader(state, "Поток модуля датчиков завершился".into()); return; }
+            Err(error) => { fail_helper_reader(state, format!("Ошибка потока датчиков: {error}")); return; }
+        };
+        match serde_json::from_slice::<SensorData>(&record) {
+            Ok(data) => if let Ok(mut state) = state.lock() {
+                state.status = data.status.clone(); state.data = data;
+                state.updated = Some(Instant::now());
+            },
+            Err(_) => { fail_helper_reader(state, "Модуль датчиков передал некорректные данные".into()); return; }
+        }
+    }
+}
+
+fn helper_output_expired(started: Instant, updated: Option<Instant>, now: Instant) -> bool {
+    now.saturating_duration_since(updated.unwrap_or(started)) >= HELPER_OUTPUT_TIMEOUT
+}
+
+struct SensorHelper {
+    child: Child,
+    alive: bool,
+    stopping: bool,
+    started: Instant,
+    last_stop_attempt: Option<Instant>,
+    state: Arc<Mutex<HelperState>>,
+    // An anonymous, non-inherited job also kills a blocked helper when the
+    // parent exits through --diagnostics or without Rust thread destructors.
+    _job: HelperJob,
+}
 
 impl SensorHelper {
-    fn launch(state: Arc<Mutex<HelperState>>) -> Option<Self> {
-        let app_dir = std::env::current_exe().ok()?.parent()?.to_owned();
+    fn launch(gpu_name: Option<&str>) -> Result<Self, String> {
+        let app_dir = std::env::current_exe().map_err(|e| e.to_string())?.parent()
+            .ok_or("Не удалось определить папку программы")?.to_owned();
         let candidates = [app_dir.join("sensors").join("OrbitSensors.exe"), app_dir.join("OrbitSensors.exe")];
         let path = match candidates.into_iter().find(|p| p.is_file()) {
             Some(path) => path,
-            None => {
-                if let Ok(mut s) = state.lock() { s.status = "Модуль температур не найден; остальные показатели работают".into(); }
-                return None;
-            }
+            None => return Err("Модуль температур не найден; остальные показатели работают".into()),
         };
         let mut command = Command::new(&path);
         command.arg("--parent").arg(std::process::id().to_string())
             .current_dir(path.parent().unwrap()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        if let Some(name) = gpu_name.filter(|name| !name.trim().is_empty()) { command.arg("--gpu-name").arg(name); }
         #[cfg(windows)] {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
-        match command.spawn() {
-            Ok(mut child) => {
-                if let Some(stdout) = child.stdout.take() {
-                    let reader_state = state.clone();
-                    thread::Builder::new().name("orbit-sensors".into()).spawn(move || {
-                        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                            if line.len() > 16_384 { continue; }
-                            if let Ok(data) = serde_json::from_str::<SensorData>(&line) {
-                                if let Ok(mut s) = reader_state.lock() {
-                                    s.status = data.status.clone();
-                                    s.data = data;
-                                    s.updated = Some(Instant::now());
-                                }
-                            }
-                        }
-                    }).ok();
-                }
-                if let Ok(mut s) = state.lock() { s.status = "Подключение датчиков…".into(); }
-                Some(Self { child, alive: true })
-            }
-            Err(error) => {
-                if let Ok(mut s) = state.lock() { s.status = format!("Не удалось запустить модуль датчиков: {error}"); }
-                None
-            }
-        }
+        let mut child = command.spawn().map_err(|error| format!("Не удалось запустить модуль датчиков: {error}"))?;
+        let job = HelperJob::assign(&child).map_err(|error| {
+            let _ = child.kill();
+            format!("Не удалось включить безопасное завершение модуля датчиков: {error}")
+        })?;
+        let stdout = child.stdout.take().ok_or("Не удалось открыть поток модуля датчиков")?;
+        // Every generation owns a fresh Arc. An old reader can never make a
+        // replacement process's sample appear fresh or overwrite its status.
+        let state = Arc::new(Mutex::new(HelperState::default()));
+        let reader_state = state.clone();
+        thread::Builder::new().name("orbit-sensors".into())
+            .spawn(move || receive_helper(BufReader::new(stdout), &reader_state))
+            .map_err(|error| format!("Не удалось прочитать модуль датчиков: {error}"))?;
+        Ok(Self { child, alive: true, stopping: false, started: Instant::now(), last_stop_attempt: None, state, _job: job })
     }
 
-    fn check_exit(&mut self, state: &Arc<Mutex<HelperState>>) {
+    fn poll(&mut self, now: Instant) {
         if self.alive && matches!(self.child.try_wait(), Ok(Some(_))) {
             self.alive = false;
-            if let Ok(mut s) = state.lock() {
+            if let Ok(mut s) = self.state.lock() {
                 s.updated = None;
-                if s.data.status.is_empty() {
+                s.data = SensorData::default();
+                if !self.stopping && !s.reader_failed {
                     s.status = "Модуль датчиков завершился. Проверьте установку или права доступа".into();
                 }
             }
         }
+        if self.alive && self.stopping && retry_due(self.last_stop_attempt, now, SENSOR_RETRY_INTERVAL) {
+            self.last_stop_attempt = Some(now); let _ = self.child.kill();
+        }
+    }
+
+    fn should_restart(&self, now: Instant) -> bool {
+        if !self.alive || self.stopping { return false; }
+        self.state.lock().map_or(true, |state| state.reader_failed || helper_output_expired(self.started, state.updated, now))
+    }
+
+    fn request_stop(&mut self, status: &str) {
+        if !self.alive || self.stopping { return; }
+        self.stopping = true; self.last_stop_attempt = Some(Instant::now());
+        if let Ok(mut state) = self.state.lock() {
+            state.data = SensorData::default(); state.updated = None; state.status = status.into();
+        }
+        let _ = self.child.kill();
     }
 }
 
 impl Drop for SensorHelper {
-    fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); }
+    fn drop(&mut self) { if self.alive { let _ = self.child.kill(); } }
 }
+
+struct HelperJob(windows_sys::Win32::Foundation::HANDLE);
+impl HelperJob {
+    fn assign(child: &Child) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::*;
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() { return Err(io::Error::last_os_error()); }
+        let job = Self(handle);
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if unsafe { SetInformationJobObject(handle, JobObjectExtendedLimitInformation,
+            (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), std::mem::size_of_val(&info) as u32) } == 0
+            || unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(job)
+    }
+}
+impl Drop for HelperJob { fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0); } } }
 
 // NVML ships with the NVIDIA driver. Loading the DLL directly avoids launching
 // nvidia-smi each sample and leaves non-NVIDIA systems fully functional.
@@ -308,21 +446,55 @@ fn valid_gpu_memory(used: u64, total: u64, api_version: u8) -> Option<GpuMemory>
     (total > 0 && total != u64::MAX && used <= total).then_some(GpuMemory { used, total, api_version })
 }
 
+#[cfg(test)]
 fn query_nvml_memory(device: NvmlHandle, get_v2: Option<GetMemoryV2>, get_v1: Option<GetMemory>) -> Option<GpuMemory> {
+    query_nvml_memory_status(device, get_v2, get_v1).0
+}
+
+fn query_nvml_memory_status(device: NvmlHandle, get_v2: Option<GetMemoryV2>, get_v1: Option<GetMemory>) -> (Option<GpuMemory>, Option<u32>) {
+    let mut last_status = None;
     if let Some(get) = get_v2 {
         let mut value = NvmlMemoryV2 { version: NVML_MEMORY_V2_VERSION, ..NvmlMemoryV2::default() };
-        if unsafe { get(device, &mut value) } == 0 {
+        let status = unsafe { get(device, &mut value) };
+        if status == 0 {
             // Keep the driver's allocated value unchanged. Reserved-memory
             // accounting differs between API/driver versions; do not add or
             // subtract that field or mix this snapshot with Windows counters.
             if let Some(memory) = valid_gpu_memory(value.used, value.total, 2)
-                .filter(|_| value.free <= value.total && value.reserved <= value.total) { return Some(memory); }
+                .filter(|_| value.free <= value.total && value.reserved <= value.total) { return (Some(memory), Some(0)); }
         }
+        if nvml_device_error(status) { return (None, Some(status)); }
+        last_status = Some(status);
     }
-    let get = get_v1?;
+    let Some(get) = get_v1 else { return (None, last_status); };
     let mut value = NvmlMemory::default();
-    if unsafe { get(device, &mut value) } != 0 || value.free > value.total { return None; }
-    valid_gpu_memory(value.used, value.total, 1)
+    let status = unsafe { get(device, &mut value) };
+    if status != 0 || value.free > value.total { return (None, Some(status)); }
+    (valid_gpu_memory(value.used, value.total, 1), Some(status))
+}
+
+fn nvml_device_error(status: u32) -> bool {
+    // NVIDIA nvmlReturn_t: uninitialized, invalid device, missing driver,
+    // GPU lost, reset required, or driver/library mismatch. Read-only API
+    // arguments are constants, so INVALID_ARGUMENT means an unusable handle.
+    matches!(status, 1 | 2 | 9 | 15 | 16 | 18)
+}
+
+#[derive(Default)]
+struct NvmlHealth { fatal: bool, sample_success: bool, sample_error: bool, failures: u8 }
+impl NvmlHealth {
+    fn begin_sample(&mut self) { self.sample_success = false; self.sample_error = false; }
+    fn observe(&mut self, status: u32) {
+        if status == 0 { self.sample_success = true; }
+        else if nvml_device_error(status) { self.fatal = true; }
+        // Unsupported/permission/version-limited optional capabilities do not
+        // repeatedly tear down otherwise healthy temperature/load monitoring.
+        else if !matches!(status, 3 | 4 | 13 | 25) { self.sample_error = true; }
+    }
+    fn finish_sample(&mut self) {
+        self.failures = if !self.sample_success && self.sample_error { self.failures.saturating_add(1) } else { 0 };
+    }
+    fn needs_reopen(&self) -> bool { self.fatal || self.failures >= 8 }
 }
 
 struct Nvml {
@@ -339,13 +511,15 @@ struct Nvml {
     cached_temperature: Option<f32>,
     last_memory_read: Option<Instant>,
     cached_memory: Option<GpuMemory>,
+    health: NvmlHealth,
 }
 
 impl Nvml {
     fn open() -> Option<Self> {
-        let windows = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"));
-        let programs = std::env::var_os("ProgramW6432").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Program Files"));
-        for path in [windows.join("System32").join("nvml.dll"), programs.join("NVIDIA Corporation").join("NVSMI").join("nvml.dll")] {
+        let system = crate::windows_paths::system_directory().map(|directory| directory.join("nvml.dll"));
+        let programs = crate::windows_paths::program_files_directory()
+            .map(|directory| directory.join("NVIDIA Corporation").join("NVSMI").join("nvml.dll"));
+        for path in [system, programs].into_iter().flatten() {
             if let Some(nvml) = unsafe { Self::load(path) } { return Some(nvml); }
         }
         None
@@ -375,19 +549,25 @@ impl Nvml {
             CStr::from_ptr(name_buffer.as_ptr()).to_string_lossy().into_owned()
         } else { "NVIDIA GPU".into() };
         Some(Self { _library: library, shutdown, get_util, get_temp, get_memory, get_memory_v2, device, name, single_device,
-            last_temperature_read: None, cached_temperature: None, last_memory_read: None, cached_memory: None })
+            last_temperature_read: None, cached_temperature: None, last_memory_read: None, cached_memory: None,
+            health: NvmlHealth::default() })
     }
 
     fn utilization(&mut self) -> Option<f32> {
         let mut value = NvmlUtilization { gpu: 0, memory: 0 };
-        (unsafe { (self.get_util)(self.device, &mut value) } == 0).then_some(value.gpu as f32).and_then(finite_percent)
+        let status = unsafe { (self.get_util)(self.device, &mut value) };
+        self.health.observe(status);
+        (status == 0).then_some(value.gpu as f32).and_then(finite_percent)
     }
     fn temperature(&mut self) -> Option<f32> {
+        if self.health.fatal { return None; }
         if self.last_temperature_read.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
             return self.cached_temperature;
         }
         let mut value = 0;
-        self.cached_temperature = if unsafe { (self.get_temp)(self.device, 0, &mut value) } == 0 {
+        let status = unsafe { (self.get_temp)(self.device, 0, &mut value) };
+        self.health.observe(status);
+        self.cached_temperature = if status == 0 {
             valid_temperature(Some(value as f32))
         } else { None };
         self.last_temperature_read = Some(Instant::now());
@@ -395,10 +575,13 @@ impl Nvml {
     }
 
     fn memory(&mut self) -> Option<GpuMemory> {
+        if self.health.fatal { return None; }
         if self.last_memory_read.is_some_and(|time| time.elapsed() < Duration::from_secs(1)) {
             return self.cached_memory;
         }
-        self.cached_memory = query_nvml_memory(self.device, self.get_memory_v2, self.get_memory);
+        let (memory, status) = query_nvml_memory_status(self.device, self.get_memory_v2, self.get_memory);
+        if let Some(status) = status { self.health.observe(status); }
+        self.cached_memory = memory;
         self.last_memory_read = Some(Instant::now());
         self.cached_memory
     }
@@ -659,6 +842,124 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helper_records_are_bounded_before_allocation_and_keep_record_boundaries() {
+        use std::io::Cursor;
+        let mut reader = BufReader::with_capacity(7, Cursor::new(b"{\"cpu_temp\":44}\r\n{\"gpu_temp\":55}\n"));
+        assert_eq!(read_sensor_record(&mut reader).unwrap().unwrap(), b"{\"cpu_temp\":44}");
+        assert_eq!(read_sensor_record(&mut reader).unwrap().unwrap(), b"{\"gpu_temp\":55}");
+        assert!(read_sensor_record(&mut reader).unwrap().is_none());
+        let mut boundary = vec![b'x'; MAX_SENSOR_RECORD_BYTES]; boundary.push(b'\n');
+        assert_eq!(read_sensor_record(&mut BufReader::new(Cursor::new(boundary))).unwrap().unwrap().len(), MAX_SENSOR_RECORD_BYTES);
+        let oversized = vec![b'x'; MAX_SENSOR_RECORD_BYTES * 8];
+        let mut reader = BufReader::with_capacity(32, Cursor::new(oversized));
+        assert_eq!(read_sensor_record(&mut reader).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        // The producer's whole large record has not been consumed or copied.
+        assert!(reader.get_ref().position() <= (MAX_SENSOR_RECORD_BYTES + 32) as u64);
+    }
+
+    #[test]
+    fn broken_or_oversized_helper_stream_clears_previous_data_and_requests_recovery() {
+        use std::io::Cursor;
+        for input in [b"not JSON\n".to_vec(), vec![b'x'; MAX_SENSOR_RECORD_BYTES + 1], Vec::new()] {
+            let state = Mutex::new(HelperState { data: SensorData { cpu_temp: Some(44.0), ..SensorData::default() },
+                updated: Some(Instant::now()), ..HelperState::default() });
+            receive_helper(BufReader::with_capacity(16, Cursor::new(input)), &state);
+            let state = state.lock().unwrap();
+            assert!(state.reader_failed);
+            assert!(state.updated.is_none());
+            assert!(state.data.cpu_temp.is_none());
+        }
+    }
+
+    #[test]
+    fn live_helper_without_valid_output_times_out_but_heartbeats_reset_watchdog() {
+        let start = Instant::now();
+        assert!(!helper_output_expired(start, None, start + Duration::from_secs(9)));
+        assert!(helper_output_expired(start, None, start + Duration::from_secs(10)));
+        assert!(!helper_output_expired(start, Some(start + Duration::from_secs(8)), start + Duration::from_secs(15)));
+        assert!(helper_output_expired(start, Some(start + Duration::from_secs(8)), start + Duration::from_secs(18)));
+    }
+
+    #[test]
+    fn nvml_initialization_failure_retries_and_manual_refresh_bypasses_backoff() {
+        use std::cell::Cell;
+        let start = Instant::now();
+        let calls = Cell::new(0);
+        let mut device = None;
+        let mut last = None;
+        let open = || { calls.set(calls.get()+1); (calls.get() >= 2).then_some(7) };
+        try_reopen(&mut device, &mut last, start, SENSOR_RETRY_INTERVAL, open);
+        assert_eq!(device, None);
+        try_reopen(&mut device, &mut last, start+Duration::from_secs(29), SENSOR_RETRY_INTERVAL, open);
+        assert_eq!(calls.get(), 1);
+        try_reopen(&mut device, &mut last, start+Duration::from_secs(30), SENSOR_RETRY_INTERVAL, open);
+        assert_eq!(device, Some(7));
+        try_reopen(&mut device, &mut last, start+Duration::from_secs(90), SENSOR_RETRY_INTERVAL, open);
+        assert_eq!(calls.get(), 2); // A working device is never periodically torn down.
+        device = None; last = None; // RefreshSensors explicitly clears both.
+        try_reopen(&mut device, &mut last, start+Duration::from_secs(91), SENSOR_RETRY_INTERVAL, open);
+        assert_eq!(calls.get(), 3);
+        assert_eq!(device, Some(7));
+    }
+
+    #[test]
+    fn nvml_device_loss_reopens_but_unsupported_optional_memory_does_not() {
+        let mut health = NvmlHealth::default();
+        for _ in 0..16 {
+            health.begin_sample(); health.observe(0); health.observe(3); health.finish_sample();
+            assert!(!health.needs_reopen());
+        }
+        health.begin_sample(); health.observe(0); health.observe(15); health.finish_sample();
+        assert!(health.needs_reopen()); // Fatal memory error wins over earlier cached/core success.
+        let mut health = NvmlHealth::default();
+        for attempt in 0..8 {
+            health.begin_sample(); health.observe(999); health.finish_sample();
+            assert_eq!(health.needs_reopen(), attempt == 7);
+        }
+        let mut health = NvmlHealth::default();
+        for status in [999, 999, 0, 999] {
+            health.begin_sample(); health.observe(status); health.finish_sample();
+        }
+        assert_eq!(health.failures, 1);
+    }
+
+    #[test]
+    fn fatal_vram_error_is_not_hidden_by_v1_fallback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static V1_CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn lost(_device: NvmlHandle, _output: *mut NvmlMemoryV2) -> u32 { 15 }
+        unsafe extern "C" fn stale(_device: NvmlHandle, output: *mut NvmlMemory) -> u32 {
+            V1_CALLS.fetch_add(1, Ordering::Relaxed);
+            *output = NvmlMemory { total: 12_000, free: 9_000, used: 3_000 }; 0
+        }
+        let (memory,status) = query_nvml_memory_status(std::ptr::null_mut(), Some(lost), Some(stale));
+        assert!(memory.is_none());
+        assert_eq!(status, Some(15));
+        assert_eq!(V1_CALLS.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn owned_helper_job_terminates_its_process_without_waiting_forever() {
+        use std::os::windows::process::CommandExt;
+        let cmd = crate::windows_paths::system_directory().unwrap().join("cmd.exe");
+        let mut child = Command::new(cmd).args(["/D", "/C", "set /p ORBIT_JOB_TEST="])
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+            .creation_flags(0x08000000).spawn().unwrap();
+        let job = match HelperJob::assign(&child) {
+            Ok(job) => job,
+            Err(error) => { let _ = child.kill(); panic!("Own child job assignment failed: {error}"); }
+        };
+        assert!(child.try_wait().unwrap().is_none());
+        drop(job); // Equivalent to the parent's job handle closing at process exit.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if child.try_wait().unwrap().is_some() { break; }
+            if Instant::now() >= deadline { let _ = child.kill(); panic!("Helper job did not terminate its child"); }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn available_ram_rejects_missing_or_invalid_total_but_keeps_real_zero() {

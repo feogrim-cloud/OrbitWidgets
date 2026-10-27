@@ -16,7 +16,11 @@ foreach ($candidate in $mingwCandidates) {
     if (Test-Path -LiteralPath (Join-Path $candidate 'gcc.exe')) { $env:PATH = $candidate + ';' + $env:PATH; break }
 }
 $env:CARGO_BUILD_JOBS = '8'
-if (-not $SkipTests) { cargo test --release --locked; if ($LASTEXITCODE) { throw 'Rust tests failed.' } }
+if (-not $SkipTests) {
+    cargo test --release --locked
+    if ($LASTEXITCODE) { throw 'Rust tests failed.' }
+    ./scripts/Test-SensorHelper.ps1
+}
 cargo build --release --locked
 if ($LASTEXITCODE) { throw 'Rust build failed.' }
 $cscPath = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'

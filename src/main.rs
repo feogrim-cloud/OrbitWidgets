@@ -8,6 +8,7 @@ mod model;
 mod platform;
 mod startup;
 mod ui;
+mod windows_paths;
 
 use std::{sync::{atomic::Ordering, Arc}, time::{Duration, Instant}};
 use eframe::egui;
@@ -80,9 +81,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native("Orbit Widgets", native_options, Box::new(move |cc| {
         // Use the installed Windows UI font for Cyrillic and traffic arrows.
         // The font is read locally and is not redistributed with the app.
-        let font_path = std::env::var_os("WINDIR").map(std::path::PathBuf::from)
-            .unwrap_or_else(|| "C:\\Windows".into()).join("Fonts").join("segoeui.ttf");
-        if let Ok(data) = std::fs::read(font_path) {
+        if let Some(data) = windows_paths::ui_font() {
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert("windows-ui".into(), Arc::new(egui::FontData::from_owned(data)));
             fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0,"windows-ui".into());

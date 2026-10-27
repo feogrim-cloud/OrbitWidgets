@@ -3,7 +3,7 @@
 //! unavailable counter is never presented as a real zero or a previous value.
 use crate::model::DiskMetric;
 use libloading::Library;
-use std::{collections::{HashMap, HashSet}, path::PathBuf, ptr::null, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet}, ptr::null, time::{Duration, Instant}};
 
 const REOPEN_DELAY: Duration = Duration::from_secs(30);
 const PDH_FORMAT: u32 = 0x200 | 0x1000 | 0x8000; // DOUBLE | NOSCALE | NOCAP100: raw bytes/second.
@@ -153,7 +153,7 @@ struct PdhApi {
 
 impl PdhApi {
     fn open() -> Option<Self> { unsafe {
-        let path = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| "C:\\Windows".into()).join("System32").join("pdh.dll");
+        let path = crate::windows_paths::system_directory()?.join("pdh.dll");
         let library = Library::new(path).ok()?;
         let open = *library.get(b"PdhOpenQueryW\0").ok()?;
         let add = *library.get(b"PdhAddEnglishCounterW\0").ok()?;

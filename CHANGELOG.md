@@ -1,5 +1,51 @@
 # Changelog / Изменения
 
+## 1.1.10 — 2026-10-27
+
+### English
+
+- Set CPU/GPU load and temperature, video memory, RAM, network and drive read/write sampling to once per second. Drive capacity and occupied-space discovery remain on their five-second interval.
+- Kept the short, adaptive ring animations independent of the one-second readings. Existing settings and the recovery and security fixes remain unchanged.
+
+### Русский
+
+- Нагрузка и температуры ЦП/ГП, видеопамять, ОЗУ, сеть, скорости чтения и записи дисков обновляются раз в секунду. Опрос объёма и занятого места дисков сохраняет интервал пять секунд.
+- Короткая адаптивная анимация дуг работает независимо от секундного обновления показаний. Существующие настройки и исправления восстановления и безопасности сохранены.
+
+## 1.1.9 — 2026-10-27
+
+### English
+
+- Smoothed ring changes with 200 ms transitions. Frames are requested at up to about 60 fps for larger movements and about 30 fps for movements below 4 physical pixels. Changes of 0.35 physical pixels or less snap to the target; without animation the repaint interval is 250 ms. Missing readings reset the affected arc immediately.
+- Kept numeric readings and sensor sampling intervals unchanged. The animation changes only how the arcs move between received values; existing settings and the 1.1.8 recovery and security fixes are retained.
+
+### Русский
+
+- Дуги плавно переходят к новому значению за 200 мс. При больших перемещениях кадры запрашиваются с частотой до примерно 60 в секунду, при перемещениях меньше 4 физических пикселей — около 30. Изменения до 0,35 физического пикселя включительно сразу устанавливают целевое значение; без анимации интервал перерисовки составляет 250 мс. При недоступном показании соответствующая дуга сразу сбрасывается.
+- Числовые показания и частота опроса датчиков не изменены. Меняется только движение дуг между полученными значениями; существующие настройки и исправления восстановления и безопасности из 1.1.8 сохранены.
+
+## 1.1.8 — 2026-10-27
+
+### English
+
+- Cleared stale GPU temperatures and other values from circle headers and hover details as well as the main numbers. A disconnected source no longer leaves an apparently current value in a secondary label.
+- Stopped reading cached sensor values when LibreHardwareMonitor hardware refresh fails; independent healthy hardware remains usable. GPU name, load and temperature now come from one coherent adapter, with missing or ambiguous requested adapters left unavailable.
+- Added a ten-second watchdog for a helper that remains alive without valid output, bounded each output record to 16 KiB, and cleared malformed or oversized samples before recovery. A Windows Job Object also terminates the helper when the parent exits.
+- Reopened failed NVIDIA NVML connections every thirty seconds and when **Обновить поиск датчиков** is selected, restoring GPU load, temperature and video memory after a transient initialization or device failure.
+- Registered startup task XML directly in memory through Windows Task Scheduler COM. Elevated startup now requires a protected Program Files installation, checking ownership, ACLs, bundled dependencies, parent directories and reparse points before elevation or registration. Ordinary portable use and non-elevated portable startup remain supported.
+- Resolved Windows system, Program Files and font paths through native Windows APIs instead of environment overrides. Restricted the optional Windows UI font read to the OS Fonts directory and a 16 MiB limit.
+- Updated egui/eframe to 0.34.3 and its maintained skrifa/vello_cpu font stack, removing the unmaintained ttf-parser dependency. Kept the settings schema, display controls and existing profile values unchanged.
+
+### Русский
+
+- Устаревшие температуры и другие показания ГП удаляются из заголовка круга и подсказки вместе с основным числом. При потере источника дополнительная подпись больше не сохраняет видимость актуального значения.
+- При ошибке обновления оборудования LibreHardwareMonitor сохранённые значения датчиков больше не используются; независимое исправное оборудование продолжает работать. Имя, нагрузка и температура ГП относятся к одному адаптеру; отсутствующий или неоднозначный запрошенный адаптер остаётся недоступным.
+- Добавлен контроль модуля, который работает, но десять секунд не передаёт корректные данные. Одна строка ограничена 16 КиБ; некорректные и слишком большие данные очищаются перед восстановлением. Windows Job Object завершает модуль при выходе основного процесса.
+- Подключение к NVIDIA NVML после сбоя повторяется раз в тридцать секунд и по кнопке **«Обновить поиск датчиков»**, восстанавливая нагрузку, температуру и видеопамять после временной ошибки инициализации или устройства.
+- XML задания автозапуска передаётся Планировщику Windows через COM в памяти. Повышенный автозапуск требует защищённой установки в Program Files: до запроса прав или регистрации проверяются владелец, ACL, зависимости, родительские каталоги и перенаправляющие ссылки. Обычный запуск и обычный автозапуск переносной версии доступны.
+- Системные пути Windows, Program Files и шрифтов определяются через Windows API вместо переопределений окружения. Чтение дополнительного системного шрифта ограничено папкой Fonts из системного пути и размером 16 МиБ.
+- egui/eframe обновлён до 0.34.3 с поддерживаемым шрифтовым движком skrifa/vello_cpu; зависимость от неподдерживаемого ttf-parser удалена. Схема настроек, элементы управления и значения существующего профиля сохранены.
+
 ## 1.1.7 — 2026-10-27
 
 ### English

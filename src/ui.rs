@@ -34,7 +34,7 @@ pub struct WidgetApp {
     applied_locked: Option<bool>,
     applied_top: Option<bool>,
     applied_theme: Option<Theme>,
-    smoothed: HashMap<String, [f32; 2]>,
+    smoothed: HashMap<String, [RingMotion; 2]>,
     startup_status: Option<StartupStatus>,
     startup_rx: Option<Receiver<StartupOutcome>>,
     startup_error: Option<String>,
@@ -45,6 +45,71 @@ struct StartupOutcome { status: Option<StartupStatus>, error: Option<String> }
 
 const TOOLTIP_DELAY: Duration = Duration::from_millis(350);
 const TOOLTIP_TEXT_WIDTH: f32 = 300.0;
+
+const RING_TRANSITION: Duration = Duration::from_millis(200);
+const RING_SUBPIXEL: f32 = 0.35;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum AnimationPace {
+    #[default]
+    Idle,
+    Small,
+    Full,
+}
+
+impl AnimationPace {
+    fn interval(self) -> Duration {
+        match self {
+            Self::Idle => Duration::from_millis(250),
+            Self::Small => Duration::from_micros(33_333),
+            Self::Full => Duration::from_micros(16_667),
+        }
+    }
+}
+
+fn schedule_ring_frame(ctx: &egui::Context, pace: AnimationPace) {
+    // egui subtracts predicted_dt before handing the delay to its backend.
+    // Compensate so a 60 Hz request stays a timed wait, rather than ZERO/Poll.
+    let predicted = Duration::try_from_secs_f32(ctx.input(|input| input.predicted_dt)).unwrap_or_default();
+    ctx.request_repaint_after(pace.interval().saturating_add(predicted));
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RingMotion {
+    from: f32,
+    target: Option<f32>,
+    started: Option<Instant>,
+}
+
+impl RingMotion {
+    fn value(&self, now: Instant) -> f32 {
+        let target = self.target.unwrap_or(0.0);
+        let Some(started) = self.started else { return target; };
+        let progress = (now.saturating_duration_since(started).as_secs_f32() / RING_TRANSITION.as_secs_f32()).clamp(0.0, 1.0);
+        let eased = progress * progress * (3.0 - 2.0 * progress);
+        self.from + (target - self.from) * eased
+    }
+
+    fn sample(&mut self, target: Option<f32>, now: Instant, pixels_per_turn: f32) -> (f32, AnimationPace) {
+        let target = target.filter(|value| value.is_finite()).map(|value| value.clamp(0.0, 1.0));
+        if self.target != target {
+            // Start at the displayed position, never at a predicted frame dt.
+            // A missing/first reading has no previous visible arc to animate.
+            self.from = if self.target.is_some() && target.is_some() { self.value(now) } else { target.unwrap_or(0.0) };
+            self.target = target;
+            self.started = Some(now);
+        }
+        let distance = (self.target.unwrap_or(0.0) - self.from).abs() * pixels_per_turn.max(0.0);
+        let active = self.target.is_some() && distance > RING_SUBPIXEL
+            && self.started.is_some_and(|start| now.saturating_duration_since(start) < RING_TRANSITION);
+        if !active {
+            self.from = self.target.unwrap_or(0.0);
+            self.started = None;
+            return (self.from, AnimationPace::Idle);
+        }
+        (self.value(now), if distance < 4.0 { AnimationPace::Small } else { AnimationPace::Full })
+    }
+}
 
 #[derive(Clone)]
 struct TooltipTarget { id: String, text: String, rect: Rect }
@@ -310,17 +375,12 @@ impl WidgetApp {
                 footer: None, outer: None, inner: None, accent: p.blue, secondary: p.blue, tooltip: "Все виджеты выключены. Правый клик — открыть настройки.".into() });
         }
         if self.last_sample.is_some_and(|sample| sample.elapsed() > Duration::from_secs(4)) {
-            for gauge in &mut gauges {
-                gauge.main = "—".into(); gauge.detail = "нет обновления".into();
-                if gauge.id == "ram" { gauge.label = "ОЗУ · —".into(); gauge.detail = "из — ГБ".into(); gauge.footer = Some("дост. — ГБ".into()); }
-                gauge.outer = None; gauge.inner = None;
-                gauge.tooltip.push_str("\nДанные не обновлялись более 4 секунд.");
-            }
+            for gauge in &mut gauges { clear_stale_gauge(gauge); }
         }
         gauges
     }
 
-    fn draw_gauge(&mut self, ui: &mut egui::Ui, rect: Rect, gauge: &Gauge, palette: Palette, dt: f32) -> (bool, Option<TooltipTarget>) {
+    fn draw_gauge(&mut self, ui: &mut egui::Ui, rect: Rect, gauge: &Gauge, palette: Palette, now: Instant) -> (AnimationPace, Option<TooltipTarget>) {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let center = rect.center();
         let diameter = rect.width();
@@ -331,26 +391,25 @@ impl WidgetApp {
         let outer_width = (diameter * 0.043).clamp(3.5, 8.0);
         let inner_width = (diameter * 0.027).clamp(2.5, 5.0);
         let inner_radius = radius - outer_width - diameter * 0.032;
-        let targets = [gauge.outer.unwrap_or(0.0), gauge.inner.unwrap_or(0.0)];
-        let smooth = self.smoothed.entry(gauge.id.clone()).or_insert(targets);
-        let interpolation = 1.0 - (-dt.min(0.1) * 24.0).exp();
-        let mut animating = false;
-        for (value, target) in smooth.iter_mut().zip(targets) {
-            *value += (target - *value) * interpolation;
-            if (*value - target).abs() < 0.001 { *value = target; } else { animating = true; }
-        }
         // Both tracks stay visible for missing sensors, with an explicit dash in the label.
         let outer_enabled = match gauge.id.as_str() { "cpu" => self.config.cpu_usage,
             "gpu" => self.config.gpu_usage || (self.config.gpu_memory && !self.config.gpu_temp), _ => true };
         let disk_speed_layout = gauge.id.starts_with("disk-") && self.config.disk_mode == DiskMode::Speed;
         let inner_enabled = match gauge.id.as_str() { "cpu" => self.config.cpu_temp, "gpu" => self.config.gpu_temp, "network" => true, _ => disk_speed_layout };
+        let targets = [gauge.outer.filter(|_| outer_enabled), gauge.inner.filter(|_| inner_enabled)];
+        if !self.smoothed.contains_key(&gauge.id) { self.smoothed.insert(gauge.id.clone(), [RingMotion::default(); 2]); }
+        let motion = self.smoothed.get_mut(&gauge.id).unwrap();
+        let circumference = std::f32::consts::TAU * ui.ctx().pixels_per_point();
+        let (outer, outer_pace) = motion[0].sample(targets[0], now, circumference * radius);
+        let (inner, inner_pace) = motion[1].sample(targets[1], now, circumference * inner_radius);
+        let animating = outer_pace.max(inner_pace);
         if outer_enabled {
             paint.circle_stroke(center, radius, Stroke::new(outer_width, alpha(palette.track, opacity)));
-            if gauge.outer.is_some() { draw_arc(paint, center, radius, smooth[0], outer_width, alpha(gauge.accent, opacity)); }
+            if gauge.outer.is_some() { draw_arc(paint, center, radius, outer, outer_width, alpha(gauge.accent, opacity)); }
         }
         if inner_enabled {
             paint.circle_stroke(center, inner_radius, Stroke::new(inner_width, alpha(palette.track, opacity)));
-            if gauge.inner.is_some() { draw_arc(paint, center, inner_radius, smooth[1], inner_width, alpha(gauge.secondary, opacity)); }
+            if gauge.inner.is_some() { draw_arc(paint, center, inner_radius, inner, inner_width, alpha(gauge.secondary, opacity)); }
         }
         if gauge.id == "ram" {
             // RAM has no inner ring: use the full interior for its four rows.
@@ -431,17 +490,17 @@ impl WidgetApp {
                     y * root_pixels_per_point / child_pixels_per_point,
                 )));
                 tooltip_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                egui::CentralPanel::default().frame(egui::Frame::NONE.fill(fill)).show(tooltip_ctx, |ui| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE.fill(fill)).show_inside(tooltip_ctx, |ui| {
                     ui.painter().galley(ui.min_rect().min + Vec2::new(12.0, 10.0), galley.clone(), palette.text);
                 });
             });
     }
 
-    fn settings_ui(&mut self, ctx: &egui::Context) {
+    fn settings_ui(&mut self, root_ui: &mut egui::Ui) {
         let before = serde_json::to_string(&self.config).unwrap_or_default();
         let previous_adapter = self.config.network_adapter.clone();
         let previous_anchor = (self.config.anchor, self.config.monitor_index, self.config.margin);
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.add_space(4.0);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.heading("Показатели");
@@ -542,7 +601,7 @@ impl WidgetApp {
                 ui.add_space(12.0); ui.separator(); ui.add_space(5.0);
                 self.startup_settings(ui);
                 ui.add_space(12.0); ui.separator(); ui.add_space(5.0);
-                ui.small("Данные: нагрузка, ОЗУ и сеть — каждые 0,5 с; температуры и скорость дисков — 1 с; место на дисках — 5 с. Значок «—» означает, что датчик пока недоступен.");
+                ui.small("Данные: нагрузка, температуры, память, сеть и скорость дисков — раз в 1 с; место на дисках — раз в 5 с. Значок «—» означает, что датчик пока недоступен.");
                 ui.small("Объёмы памяти и дисков: 1 ГБ = 1024³ байт. Скорость дисков и сети: 1 МБ = 1 000 000 байт.");
                 if let Some(error) = &self.save_error { ui.colored_label(Color32::from_rgb(245, 130, 115), format!("Не удалось сохранить настройки: {error}")); }
                 ui.add_space(7.0);
@@ -563,7 +622,8 @@ impl WidgetApp {
 }
 
 impl eframe::App for WidgetApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &root_ui.ctx().clone();
         crate::platform::prepare_taskbar_windows();
         let startup_result = self.startup_rx.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(outcome) => Some(outcome),
@@ -600,6 +660,7 @@ impl eframe::App for WidgetApp {
         }
         let palette = Palette::new(self.config.theme);
         let gauges = self.gauges(palette);
+        self.smoothed.retain(|id, _| gauges.iter().any(|gauge| &gauge.id == id));
         let padding = 8.0;
         let work_area = crate::platform::work_area_size(self.config.monitor_index);
         if work_area != self.last_work_area { self.need_anchor = true; self.last_work_area = work_area; }
@@ -625,10 +686,10 @@ impl eframe::App for WidgetApp {
                 if self.config.position != Some(position) { self.config.position = Some(position); self.mark_changed(); }
             }
         }
-        let dt = ctx.input(|i| i.stable_dt);
-        let mut animating = false;
+        let now = Instant::now();
+        let mut animating = AnimationPace::Idle;
         let mut hovered_tooltip = None;
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(root_ui, |ui| {
             for (index, gauge) in gauges.iter().enumerate() {
                 let (column, row) = match self.config.layout {
                     Layout::Horizontal => (index % plan.columns, index / plan.columns),
@@ -637,8 +698,8 @@ impl eframe::App for WidgetApp {
                 let stride = plan.diameter + plan.gap;
                 let min = ui.min_rect().min + Vec2::new(padding + column as f32 * stride, padding + row as f32 * stride);
                 let rect = Rect::from_min_size(min, Vec2::splat(plan.diameter));
-                let (gauge_animating, tooltip) = self.draw_gauge(ui, rect, gauge, palette, dt);
-                animating |= gauge_animating;
+                let (gauge_animating, tooltip) = self.draw_gauge(ui, rect, gauge, palette, now);
+                animating = animating.max(gauge_animating);
                 if tooltip.is_some() { hovered_tooltip = tooltip; }
             }
         });
@@ -673,7 +734,7 @@ impl eframe::App for WidgetApp {
                 }
             }
         }
-        ctx.request_repaint_after(if animating { Duration::from_millis(33) } else { Duration::from_millis(250) });
+        schedule_ring_frame(ctx, animating);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] }
@@ -695,6 +756,19 @@ fn draw_arc(painter: &egui::Painter, center: Pos2, radius: f32, fraction: f32, w
 }
 
 fn alpha(color: Color32, opacity: f32) -> Color32 { color.gamma_multiply(opacity) }
+fn clear_stale_gauge(gauge: &mut Gauge) {
+    gauge.main = "—".into();
+    gauge.detail = "нет обновления".into();
+    gauge.outer = None; gauge.inner = None;
+    // Temperature can share the GPU header with the title. It must expire with
+    // the other values; the tooltip must not present the previous sample as live.
+    if gauge.id == "gpu" { gauge.label = "ГП".into(); }
+    if gauge.id == "ram" {
+        gauge.label = "ОЗУ · —".into(); gauge.detail = "из — ГБ".into();
+        gauge.footer = Some("дост. — ГБ".into());
+    } else if gauge.footer.is_some() { gauge.footer = Some("—".into()); }
+    gauge.tooltip = format!("{}\nДанные не обновлялись более 4 секунд. Показания временно недоступны.", gauge.label);
+}
 fn valid_gpu_memory(used: Option<u64>, total: Option<u64>) -> Option<(u64, u64)> {
     used.zip(total).filter(|(used, total)| *total > 0 && used <= total)
 }
@@ -733,7 +807,7 @@ fn ram_gauge(m: &Metrics, p: Palette) -> Gauge {
         id: "ram".into(), label: format!("ОЗУ · {}", percent(load)), main: used.clone(),
         detail: format!("из {total} ГБ"), footer: Some(format!("дост. {available_text} ГБ")),
         outer: fraction, inner: None, accent: p.blue, secondary: p.blue,
-        tooltip: format!("Оперативная память\nЗагрузка: {}\nЗанято: {} ГБ\nВсего: {} ГБ\nДоступно: {} ГБ\nДоступная физическая память включает кэш, который Windows может сразу использовать для приложений.\nКонтур — доля занятой памяти. Обновление каждые 0,5 с.",
+        tooltip: format!("Оперативная память\nЗагрузка: {}\nЗанято: {} ГБ\nВсего: {} ГБ\nДоступно: {} ГБ\nДоступная физическая память включает кэш, который Windows может сразу использовать для приложений.\nКонтур — доля занятой памяти. Обновление раз в 1 с.",
             percent(load), used, total, available_text),
     }
 }
@@ -891,7 +965,7 @@ pub mod gallery {
             };
             let (_snapshots, rx) = mpsc::channel();
             let (commands, _command_rx) = mpsc::channel();
-            let mut app = WidgetApp {
+            let app = WidgetApp {
                 config, rx, commands, signals: Arc::new(UiSignals::default()), metrics,
                 last_sample: Some(Instant::now()), settings_open: false, save_at: None, save_error: None,
                 last_size: Vec2::ZERO, last_work_area: [0.0; 2], last_pixels_per_point: 0.0,
@@ -899,29 +973,30 @@ pub mod gallery {
                 smoothed: HashMap::new(), startup_status: Some(StartupStatus { enabled: false, elevated: false }),
                 startup_rx: None, startup_error: None, tooltip: TooltipState::default(),
             };
-            for gauge in app.gauges(Palette::new(app.config.theme)) {
-                app.smoothed.insert(gauge.id, [gauge.outer.unwrap_or(0.0), gauge.inner.unwrap_or(0.0)]);
-            }
             Self { app, scene }
         }
     }
 
     impl eframe::App for GalleryApp {
-        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &root_ui.ctx().clone();
             ctx.set_pixels_per_point(1.0);
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.scene.canvas().into()));
             ctx.set_visuals(if self.app.config.theme == Theme::Light { egui::Visuals::light() } else { egui::Visuals::dark() });
             if self.scene == Scene::DiskSpeed {
                 let palette = Palette::new(self.app.config.theme);
                 let disk = self.app.metrics.disks[0].clone();
-                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(root_ui, |ui| {
                     for (offset, mode, title) in [(0.0, DiskMode::Volume, "Объём"), (310.0, DiskMode::Speed, "Скорость")] {
                         self.app.config.disk_mode = mode;
                         let gauge = disk_gauge(&disk, mode, self.app.config.disk_scale_mbps, palette);
                         ui.painter().text(Pos2::new(offset + 155.0, 25.0), Align2::CENTER_CENTER, title, FontId::proportional(18.0), palette.text);
                         for (x, diameter) in [(28.0, 83.0), (155.0, 128.0)] {
                             let min = Pos2::new(offset + x, 125.0 - diameter / 2.0);
-                            let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), &gauge, palette, 1.0 / 60.0);
+                            // Static gallery comparisons show the final value of
+                            // each mode, without sharing a transition between modes.
+                            self.app.smoothed.remove(&gauge.id);
+                            let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), &gauge, palette, Instant::now());
                             ui.painter().text(Pos2::new(offset + x + diameter / 2.0, 210.0), Align2::CENTER_CENTER, format!("{diameter:.0} px"), FontId::proportional(11.0), palette.muted);
                         }
                     }
@@ -929,17 +1004,17 @@ pub mod gallery {
             } else if self.scene == Scene::GpuMemory || self.scene == Scene::RamMemory {
                 let palette = Palette::new(self.app.config.theme);
                 let gauges = self.app.gauges(palette);
-                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(root_ui, |ui| {
                     if let Some(gauge) = if self.scene == Scene::RamMemory { gauges.iter().find(|g| g.id == "ram") } else { gauges.first() } {
                         for (x, diameter) in [(28.0, 83.0), (155.0, 128.0)] {
                             let min = Pos2::new(x, 95.0 - diameter / 2.0);
-                            let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), gauge, palette, 1.0 / 60.0);
+                            let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), gauge, palette, Instant::now());
                             ui.painter().text(Pos2::new(x + diameter/2.0, 173.0), Align2::CENTER_CENTER, format!("{diameter:.0} px"), FontId::proportional(11.0), palette.muted);
                         }
                     }
                 });
             } else if self.scene == Scene::Settings {
-                self.app.settings_ui(ctx);
+                self.app.settings_ui(root_ui);
             } else {
                 let palette = Palette::new(self.app.config.theme);
                 let gauges = self.app.gauges(palette);
@@ -947,7 +1022,7 @@ pub mod gallery {
                 let diameter = self.app.config.diameter;
                 let gap = self.app.config.gap;
                 let length = gauges.len() as f32 * diameter + gauges.len().saturating_sub(1) as f32 * gap;
-                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(root_ui, |ui| {
                     for (index, gauge) in gauges.iter().enumerate() {
                         let along = index as f32 * (diameter + gap);
                         let min = if self.scene == Scene::Vertical {
@@ -955,7 +1030,7 @@ pub mod gallery {
                         } else {
                             Pos2::new((canvas[0] - length) / 2.0 + along, (canvas[1] - diameter) / 2.0)
                         };
-                        let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), gauge, palette, 1.0 / 60.0);
+                        let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), gauge, palette, Instant::now());
                     }
                 });
             }
@@ -978,6 +1053,124 @@ pub mod gallery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_transition_starts_without_an_idle_frame_jump_and_finishes_exactly() {
+        let t = Instant::now();
+        let mut ring = RingMotion::default();
+        assert_eq!(ring.sample(Some(0.1), t, 250.0), (0.1, AnimationPace::Idle));
+        let start = t + Duration::from_secs(5);
+        assert_eq!(ring.sample(Some(0.9), start, 250.0), (0.1, AnimationPace::Full));
+        let halfway = ring.sample(Some(0.9), start + Duration::from_millis(100), 250.0);
+        assert!((halfway.0 - 0.5).abs() < 0.00001);
+        // Repeated layout passes at the same time do not advance the animation.
+        assert_eq!(ring.sample(Some(0.9), start + Duration::from_millis(100), 250.0), halfway);
+        assert_eq!(ring.sample(Some(0.9), start + RING_TRANSITION, 250.0), (0.9, AnimationPace::Idle));
+        assert_eq!(ring.sample(Some(0.9), start + Duration::from_secs(10), 250.0), (0.9, AnimationPace::Idle));
+    }
+
+    #[test]
+    fn ring_position_depends_on_elapsed_time_instead_of_frame_count() {
+        let t = Instant::now();
+        let mut slow = RingMotion::default();
+        let mut fast = RingMotion::default();
+        for ring in [&mut slow, &mut fast] {
+            ring.sample(Some(0.0), t, 250.0);
+            ring.sample(Some(1.0), t, 250.0);
+        }
+        for millis in [33, 66] { slow.sample(Some(1.0), t + Duration::from_millis(millis), 250.0); }
+        for millis in [16, 32, 48, 64, 80, 96] { fast.sample(Some(1.0), t + Duration::from_millis(millis), 250.0); }
+        assert_eq!(slow.sample(Some(1.0), t + Duration::from_millis(100), 250.0),
+                   fast.sample(Some(1.0), t + Duration::from_millis(100), 250.0));
+        assert_eq!(slow.sample(Some(1.0), t + Duration::from_secs(1), 250.0), (1.0, AnimationPace::Idle));
+    }
+
+    #[test]
+    fn retargeted_ring_keeps_position_and_never_overshoots() {
+        let t = Instant::now();
+        let mut ring = RingMotion::default();
+        ring.sample(Some(0.2), t, 250.0);
+        ring.sample(Some(0.9), t, 250.0);
+        let changed = t + Duration::from_millis(80);
+        let displayed = ring.sample(Some(0.9), changed, 250.0).0;
+        assert_eq!(ring.sample(Some(0.0), changed, 250.0).0, displayed);
+        let mut previous = displayed;
+        for millis in (0..=220).step_by(10) {
+            let (value, _) = ring.sample(Some(0.0), changed + Duration::from_millis(millis), 250.0);
+            assert!((0.0..=displayed).contains(&value));
+            assert!(value <= previous);
+            previous = value;
+        }
+        assert_eq!(previous, 0.0);
+    }
+
+    #[test]
+    fn missing_ring_clears_motion_but_zero_is_a_real_animated_reading() {
+        let t = Instant::now();
+        let mut ring = RingMotion::default();
+        ring.sample(Some(0.8), t, 250.0);
+        assert_eq!(ring.sample(Some(0.0), t, 250.0), (0.8, AnimationPace::Full));
+        assert_eq!(ring.sample(None, t + Duration::from_millis(50), 250.0), (0.0, AnimationPace::Idle));
+        assert_eq!(ring.sample(Some(0.6), t + Duration::from_secs(1), 250.0), (0.6, AnimationPace::Idle));
+        assert_eq!(ring.sample(Some(f32::NAN), t + Duration::from_secs(2), 250.0), (0.0, AnimationPace::Idle));
+        assert_eq!(ring.sample(Some(f32::INFINITY), t + Duration::from_secs(3), 250.0), (0.0, AnimationPace::Idle));
+    }
+
+    #[test]
+    fn subpixel_changes_do_not_request_frames_and_pace_respects_physical_size() {
+        let t = Instant::now();
+        let mut small = RingMotion::default();
+        small.sample(Some(0.5), t, 250.0);
+        assert_eq!(small.sample(Some(0.501), t, 250.0), (0.501, AnimationPace::Idle));
+        assert_eq!(small.sample(Some(0.511), t, 250.0).1, AnimationPace::Small);
+        let mut hidpi = RingMotion::default();
+        hidpi.sample(Some(0.5), t, 500.0);
+        assert_eq!(hidpi.sample(Some(0.501), t, 500.0).1, AnimationPace::Small);
+        assert_eq!(hidpi.sample(Some(0.9), t, 500.0).1, AnimationPace::Full);
+        assert_eq!(AnimationPace::Idle.interval(), Duration::from_millis(250));
+        assert_eq!(AnimationPace::Small.interval(), Duration::from_micros(33_333));
+        assert_eq!(AnimationPace::Full.interval(), Duration::from_micros(16_667));
+    }
+
+    #[test]
+    fn animation_pacer_reaches_the_egui_backend_as_a_timed_wait() {
+        for predicted_dt in [1.0 / 60.0, 1.0 / 144.0, 1.0 / 30.0] {
+            for pace in [AnimationPace::Full, AnimationPace::Small, AnimationPace::Idle] {
+                let ctx = egui::Context::default();
+                // Consume egui's initial font/layout repaint requests.
+                for frame in 0..5 {
+                    let _ = ctx.run_ui(egui::RawInput { time: Some(frame as f64), predicted_dt, ..Default::default() }, |_| {});
+                }
+                let output = ctx.run_ui(egui::RawInput { time: Some(5.0), predicted_dt, ..Default::default() }, |ui| {
+                    schedule_ring_frame(ui.ctx(), pace);
+                });
+                let actual = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+                assert_eq!(actual, pace.interval(), "{pace:?}, predicted_dt={predicted_dt}");
+                assert!(!actual.is_zero());
+            }
+        }
+    }
+
+    #[test]
+    fn stale_gpu_header_tooltip_and_ram_footer_do_not_keep_numeric_samples() {
+        let p = Palette::new(Theme::Neon);
+        let mut gpu = Gauge { id: "gpu".into(), label: "ГП 66°".into(), main: "54%".into(),
+            detail: "3,4 / 12 ГБ".into(), footer: None, outer: Some(0.54), inner: Some(0.66),
+            accent: p.green, secondary: p.orange, tooltip: "ГП: 54%, температура 66 °C".into() };
+        clear_stale_gauge(&mut gpu);
+        assert_eq!(gpu.label, "ГП");
+        assert_eq!(gpu.main, "—");
+        assert_eq!(gpu.outer, None);
+        assert_eq!(gpu.inner, None);
+        assert!(!gpu.tooltip.contains("66"));
+        assert!(!gpu.tooltip.contains("54"));
+        let mut ram = ram_gauge(&Metrics { ram_total: 32 * 1_073_741_824,
+            ram_used: 12 * 1_073_741_824, ram_available: Some(20 * 1_073_741_824), ..Metrics::default() }, p);
+        clear_stale_gauge(&mut ram);
+        assert_eq!(ram.label, "ОЗУ · —");
+        assert_eq!(ram.footer.as_deref(), Some("дост. — ГБ"));
+        assert!(!ram.tooltip.contains("20"));
+    }
 
     #[test]
     fn ram_circle_keeps_used_total_available_and_percent_from_one_snapshot() {

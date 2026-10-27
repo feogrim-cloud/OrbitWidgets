@@ -10,7 +10,7 @@ import zipfile
 SOURCE_FILES = (
     '.gitignore', '.gitattributes', 'Cargo.toml', 'Cargo.lock', 'LICENSE',
     'README.md', 'README.ru.md', 'README-RU.txt', 'CHANGELOG.md',
-    'CONTRIBUTING.md', 'build.ps1',
+    'CONTRIBUTING.md', 'SECURITY.md', 'build.ps1',
 )
 SOURCE_DIRS = ('.cargo', '.github', 'src', 'sensor-helper', 'build-assets',
                'installer', 'scripts', 'docs', 'assets', 'examples')

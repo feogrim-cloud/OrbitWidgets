@@ -2,16 +2,20 @@
 use std::{
     collections::HashMap,
     ffi::{c_void, OsStr, OsString},
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     mem::{size_of, zeroed},
     os::windows::{ffi::OsStrExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Output},
     ptr::null_mut,
-    time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(feature = "startup-qa")]
+use std::io::Write;
 use xml::reader::{EventReader, XmlEvent};
+use windows::{core::BSTR, Win32::{Foundation::RPC_E_CHANGED_MODE, System::{Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED}, TaskScheduler::{ITaskService, TaskScheduler, TASK_CREATE, TASK_UPDATE, TASK_IGNORE_REGISTRATION_TRIGGERS, TASK_LOGON_INTERACTIVE_TOKEN}, Variant::VARIANT}}};
+
+#[path = "startup_security.rs"]
+mod security;
 
 const SOURCE: &str = "OrbitWidgets.Startup.v1";
 const TASK_NS: &str = "http://schemas.microsoft.com/windows/2004/02/mit/task";
@@ -60,6 +64,7 @@ pub fn configure(enabled: bool, elevated: bool) -> std::result::Result<StartupSt
 
 fn configure_inner(enabled: bool, elevated: bool) -> Result<StartupStatus> {
     let context = Context::current()?;
+    if enabled && elevated { validate_elevated_location(&context)?; }
     let previous = query_task(&context)?;
     if !enabled && previous.is_none() { return Ok(StartupStatus::default()); }
     // Raising privileges changes only the task, never the running widget window.
@@ -146,16 +151,11 @@ fn verify_requested(context: &Context, enabled: bool, elevated: bool) -> Result<
 }
 
 fn apply_local(context: &Context, enabled: bool, elevated: bool) -> Result<StartupStatus> {
+    if enabled && elevated { validate_elevated_location(context)?; }
     let previous = query_task(context)?; // Verifies marker, SID and executable before any overwrite/delete.
     if enabled {
         if !context.executable.is_file() { return Err(Failure::operation("Файл Orbit Widgets не найден")); }
-        let temporary = TemporaryXml::new(&create_xml(context, elevated))?;
-        let mut args = vec!["/Create".into(), "/TN".into(), context.task_name.clone().into(), "/XML".into(), temporary.0.as_os_str().to_owned()];
-        // A fresh registration intentionally omits /F: a name collision must
-        // fail rather than overwrite a task that appeared after the lookup.
-        if previous.is_some() { args.push("/F".into()); }
-        let output = schtasks(&args)?;
-        if !output.status.success() { return Err(Failure::operation(format!("Не удалось настроить автозапуск: {}", output_error(&output)))); }
+        register_in_memory(context, elevated, previous.is_some())?;
     } else if previous.is_some() {
         let output = schtasks(&["/Delete".into(), "/TN".into(), context.task_name.clone().into(), "/F".into()])?;
         if !output.status.success() { return Err(Failure::operation(format!("Не удалось отключить автозапуск: {}", output_error(&output)))); }
@@ -278,28 +278,53 @@ fn same_path(value: &str, expected: &Path) -> bool {
     normal(value) == normal(&expected.to_string_lossy())
 }
 
-struct TemporaryXml(PathBuf);
-impl TemporaryXml {
-    fn new(xml: &str) -> Result<Self> {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| Failure::operation(e.to_string()))?.as_nanos();
-        let path = std::env::temp_dir().join(format!("OrbitWidgets-startup-{}-{nonce}.xml", std::process::id()));
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| Failure::operation(e.to_string()))?;
-        let mut bytes = vec![0xFF, 0xFE];
-        for word in xml.encode_utf16() { bytes.extend_from_slice(&word.to_le_bytes()); }
-        if let Err(error) = file.write_all(&bytes) { let _ = fs::remove_file(&path); return Err(Failure::operation(error.to_string())); }
-        Ok(Self(path))
+// Registration receives an owned BSTR directly. No temporary path or shared
+// writable file exists between validation and the privileged Scheduler service.
+struct RegistrationRequest { name: BSTR, xml: BSTR, user: VARIANT, flags: i32 }
+impl RegistrationRequest {
+    fn new(context: &Context, elevated: bool, update: bool) -> Self {
+        Self { name: BSTR::from(context.task_name.as_str()), xml: BSTR::from(create_xml(context, elevated)),
+            user: VARIANT::from(context.sid.as_str()),
+            flags: (if update { TASK_UPDATE.0 } else { TASK_CREATE.0 }) | TASK_IGNORE_REGISTRATION_TRIGGERS.0 }
     }
 }
-impl Drop for TemporaryXml { fn drop(&mut self) { let _ = fs::remove_file(&self.0); } }
+
+struct ComApartment(bool);
+impl ComApartment {
+    fn initialize() -> windows::core::Result<Self> {
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if result == RPC_E_CHANGED_MODE { return Ok(Self(false)); }
+        result.ok()?;
+        Ok(Self(true))
+    }
+}
+impl Drop for ComApartment { fn drop(&mut self) { if self.0 { unsafe { CoUninitialize(); } } } }
+
+fn register_in_memory(context: &Context, elevated: bool, update: bool) -> Result<()> {
+    let register = || -> windows::core::Result<()> {
+        let _apartment = ComApartment::initialize()?;
+        let service: ITaskService = unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)? };
+        let empty = VARIANT::default();
+        unsafe { service.Connect(&empty, &empty, &empty, &empty)?; }
+        let folder = unsafe { service.GetFolder(&BSTR::from("\\"))? };
+        let request = RegistrationRequest::new(context, elevated, update);
+        // CREATE refuses a new name collision. UPDATE refuses to recreate a
+        // previously owned task that disappeared after the ownership check.
+        let _registered = unsafe { folder.RegisterTask(&request.name, &request.xml, request.flags,
+            &request.user, &empty, TASK_LOGON_INTERACTIVE_TOKEN, &empty)? };
+        Ok(())
+    };
+    register().map_err(|error| Failure::operation(format!("Не удалось настроить автозапуск (Windows 0x{:08X})", error.code().0 as u32)))
+}
 
 fn schtasks(args: &[OsString]) -> Result<Output> {
-    let system_root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"));
-    let result = Command::new(system_root.join("System32").join("schtasks.exe")).args(args).creation_flags(0x08000000)
+    let system_directory = crate::windows_paths::system_directory().ok_or_else(|| Failure::operation("Не найдена системная папка Windows"))?;
+    let result = Command::new(system_directory.join("schtasks.exe")).args(args).creation_flags(0x08000000)
         .output().map_err(|error| Failure::operation(format!("Планировщик заданий недоступен: {error}")));
     #[cfg(feature = "startup-qa")]
     if let Ok(output) = &result {
         if let Some(directory) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_owned)) {
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(directory.join("startup-debug.log")) {
+            if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(directory.join("startup-debug.log")) {
                 let _ = writeln!(file,"{:?}: {} | {}",args,output.status,output_error(output));
             }
             if output.status.success() && args.iter().any(|arg| arg == "/XML") {
@@ -358,6 +383,9 @@ fn quote_argument(value: &str) -> String {
 }
 
 fn apply_elevated(context: &Context, enabled: bool, elevated: bool) -> Result<()> {
+    // Never elevate the executable from a writable portable location, even
+    // when UAC is required only to disable an old elevated registration.
+    validate_elevated_location(context)?;
     let arguments = [APPLY_FLAG.to_owned(), u8::from(enabled).to_string(), u8::from(elevated).to_string(), context.sid.clone(), context.task_name.clone()]
         .iter().map(|arg| quote_argument(arg)).collect::<Vec<_>>().join(" ");
     let file = wide(context.executable.as_os_str());
@@ -384,6 +412,14 @@ fn apply_elevated(context: &Context, enabled: bool, elevated: bool) -> Result<()
         match code { 0 => Ok(()), 3 => Err(Failure { code: 3, message: "Изменение автозапуска отменено".into() }), 5 => Err(Failure::verify()),
             _ => Err(Failure::operation(format!("Windows не сохранила автозапуск (код {code})"))) }
     }
+}
+
+fn validate_elevated_location(context: &Context) -> Result<()> {
+    native_safety_preflight(&context.executable).map_err(Failure::operation)
+}
+
+pub(crate) fn native_safety_preflight(executable: &Path) -> std::result::Result<(), String> {
+    security::validate_installation(executable)
 }
 
 fn process_token() -> Result<*mut c_void> {
@@ -441,6 +477,38 @@ mod native {
 mod tests {
     use super::*;
     fn fixture() -> Context { Context { executable: PathBuf::from("C:\\Программы\\Orbit & Widgets\\orbit-widgets.exe"), sid: "S-1-5-21-100-200-300-1001".into(), task_name: "OrbitWidgets.Startup.Test.Unit".into() } }
+    #[test]
+    fn registration_xml_is_owned_in_memory_with_collision_safe_flags() {
+        let context = fixture();
+        let fresh = RegistrationRequest::new(&context, true, false);
+        assert_eq!(fresh.name.to_string(), context.task_name);
+        assert_eq!(fresh.xml.to_string(), create_xml(&context, true));
+        assert_eq!(fresh.user.vt(), windows::Win32::System::Variant::VT_BSTR);
+        assert_eq!(fresh.flags, TASK_CREATE.0 | TASK_IGNORE_REGISTRATION_TRIGGERS.0);
+        let changed = RegistrationRequest::new(&context, false, true);
+        assert_eq!(changed.flags, TASK_UPDATE.0 | TASK_IGNORE_REGISTRATION_TRIGGERS.0);
+        assert!(changed.xml.to_string().contains("<RunLevel>LeastPrivilege</RunLevel>"));
+    }
+
+    #[test]
+    #[ignore = "Creates, reads and removes only its unique normal-privilege test task in a native Windows session"]
+    fn native_com_registration_round_trip_without_temporary_xml() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let context = Context { executable: std::env::current_exe().unwrap(), sid: current_sid().map_err(|e| e.message).unwrap(),
+            task_name: format!("{TEST_PREFIX}Security118.{}.{nonce}", std::process::id()) };
+        struct RemoveTask(Context);
+        impl Drop for RemoveTask {
+            fn drop(&mut self) { let _ = apply_local(&self.0, false, false); }
+        }
+        assert!(query_task(&context).map_err(|e| e.message).unwrap().is_none());
+        let _cleanup = RemoveTask(context.clone());
+        assert_eq!(apply_local(&context, true, false).map_err(|e| e.message).unwrap(), StartupStatus { enabled: true, elevated: false });
+        assert_eq!(query_task(&context).map_err(|e| e.message).unwrap(), Some(StartupStatus { enabled: true, elevated: false }));
+        // Exercise the UPDATE-only route without ever running the action.
+        assert_eq!(apply_local(&context, true, false).map_err(|e| e.message).unwrap(), StartupStatus { enabled: true, elevated: false });
+        assert_eq!(apply_local(&context, false, false).map_err(|e| e.message).unwrap(), StartupStatus::default());
+        assert!(query_task(&context).map_err(|e| e.message).unwrap().is_none());
+    }
     #[test]
     fn task_xml_round_trips_unicode_escaped_paths_and_both_privilege_levels() {
         let context = fixture();

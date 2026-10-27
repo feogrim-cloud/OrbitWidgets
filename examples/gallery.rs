@@ -9,6 +9,7 @@
 #[path = "../src/config.rs"] mod config;
 #[path = "../src/model.rs"] mod model;
 #[path = "../src/ui.rs"] mod ui;
+#[path = "../src/windows_paths.rs"] mod windows_paths;
 
 // The real UI references these bridges. Rendering uses deterministic values and
 // deliberately cannot access native shell or startup configuration operations.
@@ -64,9 +65,7 @@ fn main() -> eframe::Result<()> {
     };
     eframe::run_native("Orbit Gallery", options, Box::new(move |cc| {
         // Match the application's Windows font without redistributing font data.
-        let font_path = std::env::var_os("WINDIR").map(std::path::PathBuf::from)
-            .unwrap_or_else(|| "C:\\Windows".into()).join("Fonts").join("segoeui.ttf");
-        if let Ok(data) = std::fs::read(font_path) {
+        if let Some(data) = windows_paths::ui_font() {
             let mut fonts = eframe::egui::FontDefinitions::default();
             fonts.font_data.insert("windows-ui".into(), std::sync::Arc::new(eframe::egui::FontData::from_owned(data)));
             fonts.families.entry(eframe::egui::FontFamily::Proportional).or_default().insert(0, "windows-ui".into());
