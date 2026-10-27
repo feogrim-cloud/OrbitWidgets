@@ -78,6 +78,11 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
             }
             system.refresh_cpu_usage();
             system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+            // sysinfo's Windows backend obtains total and available physical
+            // memory from one GlobalMemoryStatusEx call. "Available" includes
+            // immediately reusable standby cache, not just empty RAM pages.
+            let ram_total = system.total_memory();
+            let ram_available = valid_ram_available(ram_total, system.available_memory());
             while let Ok((updated, value)) = disk_rx.try_recv() { disks = value; disks_updated = Some(updated); }
             // A stalled or failed disk worker must not freeze a live speed value.
             if disks_updated.is_some_and(|time: Instant| time.elapsed() >= Duration::from_secs(3)) {
@@ -89,8 +94,9 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
             let net = network.sample(selected_network.as_deref());
             let mut metric = Metrics {
                 cpu_usage: finite_percent(system.global_cpu_usage()),
-                ram_used: system.used_memory(),
-                ram_total: system.total_memory(),
+                ram_used: ram_available.map_or(0, |available| ram_total - available),
+                ram_total,
+                ram_available,
                 disks: disks.clone(),
                 network_rx_bps: net.rx,
                 network_tx_bps: net.tx,
@@ -176,6 +182,10 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
 
 fn finite_percent(value: f32) -> Option<f32> {
     value.is_finite().then(|| value.clamp(0.0, 100.0))
+}
+
+fn valid_ram_available(total: u64, available: u64) -> Option<u64> {
+    (total > 0 && available <= total).then_some(available)
 }
 
 fn valid_temperature(value: Option<f32>) -> Option<f32> {
@@ -649,6 +659,14 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn available_ram_rejects_missing_or_invalid_total_but_keeps_real_zero() {
+        assert_eq!(valid_ram_available(0, 0), None);
+        assert_eq!(valid_ram_available(100, 101), None);
+        assert_eq!(valid_ram_available(100, 0), Some(0));
+        assert_eq!(valid_ram_available(100, 100), Some(100));
+    }
 
     #[test]
     fn nvml_memory_layout_and_version_match_nvidia_x64_header() {

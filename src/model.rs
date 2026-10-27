@@ -27,6 +27,8 @@ pub struct Metrics {
     pub gpu_name: String,
     pub ram_used: u64,
     pub ram_total: u64,
+    /// Immediately reusable physical bytes, including standby cache on Windows.
+    pub ram_available: Option<u64>,
     pub disks: Vec<DiskMetric>,
     pub network_rx_bps: f64,
     pub network_tx_bps: f64,

@@ -78,6 +78,7 @@ struct Gauge {
     label: String,
     main: String,
     detail: String,
+    footer: Option<String>,
     outer: Option<f32>,
     inner: Option<f32>,
     accent: Color32,
@@ -238,6 +239,7 @@ impl WidgetApp {
                 id: "cpu".into(), label: "ЦП".into(),
                 main: if self.config.cpu_usage { percent(m.cpu_usage) } else { temperature(m.cpu_temp) },
                 detail: if self.config.cpu_temp && self.config.cpu_usage { temperature(m.cpu_temp) } else { "процессор".into() },
+                footer: None,
                 outer: if self.config.cpu_usage { normalized(m.cpu_usage, 100.0) } else { None },
                 inner: if self.config.cpu_temp { normalized(m.cpu_temp, 100.0) } else { None },
                 accent: p.blue, secondary: heat_color(m.cpu_temp, p.orange),
@@ -265,6 +267,7 @@ impl WidgetApp {
                 detail: if memory_only { memory.map_or_else(|| "видеопамять".into(), |(_, total)| format!("из {} ГБ", memory_total_text(total))) }
                     else if self.config.gpu_memory { memory_line }
                     else if self.config.gpu_temp && self.config.gpu_usage { temperature(m.gpu_temp) } else { "графика".into() },
+                footer: None,
                 outer: if self.config.gpu_usage { normalized(m.gpu_usage, 100.0) }
                     else if memory_only { memory.and_then(|(used, total)| ratio(used, total)) } else { None },
                 inner: if self.config.gpu_temp { normalized(m.gpu_temp, 100.0) } else { None },
@@ -277,12 +280,7 @@ impl WidgetApp {
             });
         }
         if self.config.ram {
-            gauges.push(Gauge {
-                id: "ram".into(), label: "ОЗУ".into(), main: if m.ram_total > 0 { format!("{:.1}", gib(m.ram_used)).replace('.', ",") } else { "—".into() },
-                detail: if m.ram_total > 0 { format!("из {:.0} ГБ", gib(m.ram_total)) } else { "ожидание".into() },
-                outer: ratio(m.ram_used, m.ram_total), inner: None, accent: p.blue, secondary: p.blue,
-                tooltip: format!("Оперативная память: {:.2} / {:.2} ГБ\nПравый клик — настройки. Перетаскивание — переместить.", gib(m.ram_used), gib(m.ram_total)),
-            });
+            gauges.push(ram_gauge(m, p));
         }
         if self.config.disks {
             for disk in &m.disks {
@@ -299,6 +297,7 @@ impl WidgetApp {
             gauges.push(Gauge {
                 id: "network".into(), label: format!("СЕТЬ · {unit}"), main: format!("↓ {}", compact(rx / divisor)),
                 detail: format!("↑ {}", compact(tx / divisor)),
+                footer: None,
                 outer: Some((rx / maximum).clamp(0.0, 1.0) as f32),
                 inner: Some((tx / maximum).clamp(0.0, 1.0) as f32),
                 accent: p.blue, secondary: p.purple,
@@ -308,11 +307,12 @@ impl WidgetApp {
         }
         if gauges.is_empty() {
             gauges.push(Gauge { id: "empty".into(), label: "ORBIT".into(), main: "···".into(), detail: "правый клик".into(),
-                outer: None, inner: None, accent: p.blue, secondary: p.blue, tooltip: "Все виджеты выключены. Правый клик — открыть настройки.".into() });
+                footer: None, outer: None, inner: None, accent: p.blue, secondary: p.blue, tooltip: "Все виджеты выключены. Правый клик — открыть настройки.".into() });
         }
         if self.last_sample.is_some_and(|sample| sample.elapsed() > Duration::from_secs(4)) {
             for gauge in &mut gauges {
                 gauge.main = "—".into(); gauge.detail = "нет обновления".into();
+                if gauge.id == "ram" { gauge.label = "ОЗУ · —".into(); gauge.detail = "из — ГБ".into(); gauge.footer = Some("дост. — ГБ".into()); }
                 gauge.outer = None; gauge.inner = None;
                 gauge.tooltip.push_str("\nДанные не обновлялись более 4 секунд.");
             }
@@ -352,6 +352,15 @@ impl WidgetApp {
             paint.circle_stroke(center, inner_radius, Stroke::new(inner_width, alpha(palette.track, opacity)));
             if gauge.inner.is_some() { draw_arc(paint, center, inner_radius, smooth[1], inner_width, alpha(gauge.secondary, opacity)); }
         }
+        if gauge.id == "ram" {
+            // RAM has no inner ring: use the full interior for its four rows.
+            let text_radius = radius - outer_width * 0.5 - 2.0;
+            let footer_index = if diameter < 72.0 { 2 } else { 3 };
+            for (index, row) in ram_text_rows(paint, gauge, diameter, text_radius).into_iter().enumerate() {
+                let color = if index == 1 { palette.text } else if index == footer_index { palette.blue } else { palette.muted };
+                paint.galley(center + Vec2::new(-row.galley.size().x * 0.5, row.y - row.galley.size().y * 0.5), row.galley, alpha(color, opacity));
+            }
+        } else {
         let scale = diameter / 128.0;
         let gpu_memory_layout = gauge.id == "gpu" && self.config.gpu_memory;
         let header = if disk_speed_layout && diameter < 72.0 { gauge.label.split(" · ").next().unwrap_or(&gauge.label) }
@@ -381,6 +390,7 @@ impl WidgetApp {
             else { (12.0 * scale).max(9.0) };
         paint.text(center + Vec2::new(0.0, detail_y), Align2::CENTER_CENTER, &detail,
             FontId::proportional(detail_font), alpha(if disk_speed_layout || (gauge.inner.is_some() && !gpu_memory_layout) { gauge.secondary } else { palette.muted }, opacity));
+        }
         let hovered = response.hovered() && !response.dragged()
             && ui.input(|input| !input.pointer.any_down())
             && response.hover_pos().is_some_and(|position| position.distance(center) <= radius);
@@ -711,6 +721,55 @@ fn temperature(value: Option<f32>) -> String { value.filter(|v| v.is_finite()).m
 fn heat_color(temp: Option<f32>, normal: Color32) -> Color32 { if temp.is_some_and(|t| t >= 85.0) { Color32::from_rgb(255, 102, 111) } else { normal } }
 fn gib(bytes: u64) -> f64 { bytes as f64 / 1_073_741_824.0 }
 fn compact(value: f64) -> String { (if value >= 100.0 { format!("{value:.0}") } else if value >= 10.0 { format!("{value:.1}") } else { format!("{value:.2}") }).replace('.', ",") }
+fn ram_gauge(m: &Metrics, p: Palette) -> Gauge {
+    let available = m.ram_available.filter(|available| m.ram_total > 0 && *available <= m.ram_total
+        && m.ram_used.checked_add(*available) == Some(m.ram_total));
+    let fraction = available.and_then(|_| ratio(m.ram_used, m.ram_total));
+    let load = fraction.map(|v| v * 100.0);
+    let used = available.map_or_else(|| "—".into(), |_| ram_amount(m.ram_used));
+    let total = if m.ram_total > 0 { format!("{:.0}", gib(m.ram_total)) } else { "—".into() };
+    let available_text = available.map_or_else(|| "—".into(), ram_amount);
+    Gauge {
+        id: "ram".into(), label: format!("ОЗУ · {}", percent(load)), main: used.clone(),
+        detail: format!("из {total} ГБ"), footer: Some(format!("дост. {available_text} ГБ")),
+        outer: fraction, inner: None, accent: p.blue, secondary: p.blue,
+        tooltip: format!("Оперативная память\nЗагрузка: {}\nЗанято: {} ГБ\nВсего: {} ГБ\nДоступно: {} ГБ\nДоступная физическая память включает кэш, который Windows может сразу использовать для приложений.\nКонтур — доля занятой памяти. Обновление каждые 0,5 с.",
+            percent(load), used, total, available_text),
+    }
+}
+fn ram_amount(bytes: u64) -> String {
+    let value = gib(bytes);
+    if value >= 1000.0 { format!("{value:.0}") } else { format!("{value:.1}") }.replace('.', ",")
+}
+struct RamTextRow { galley: Arc<egui::Galley>, y: f32 }
+fn ram_text_rows(paint: &egui::Painter, gauge: &Gauge, diameter: f32, radius: f32) -> Vec<RamTextRow> {
+    let scale = diameter / 128.0;
+    let footer = gauge.footer.as_deref().unwrap_or("дост. — ГБ");
+    let rows = if diameter < 72.0 {
+        // The automatic layout can reduce a crowded set to 48 px. Preserve the
+        // numbers in three compact rows, with names and units in the tooltip.
+        vec![(gauge.label.split_whitespace().last().unwrap_or("—").to_owned(), -26.0 * scale, (12.0 * scale).max(7.0)),
+            (format!("{}/{}", gauge.main, gauge.detail.trim_start_matches("из ").trim_end_matches(" ГБ")), 0.0, (15.0 * scale).max(7.0)),
+            (footer.replace("дост. ", "Д").trim_end_matches(" ГБ").to_owned(), 26.0 * scale, (10.0 * scale).max(7.0))]
+    } else {
+        let footer = if diameter < 100.0 { footer.trim_end_matches(" ГБ") } else { footer };
+        vec![(gauge.label.clone(), -33.0 * scale, (11.0 * scale).max(8.0)),
+            (gauge.main.clone(), -10.0 * scale, 24.0 * scale),
+            (gauge.detail.clone(), 14.0 * scale, (11.0 * scale).max(8.0)),
+            (footer.to_owned(), 32.0 * scale, (10.5 * scale).max(7.5))]
+    };
+    rows.into_iter().map(|(mut text, y, mut font)| {
+        loop {
+            let galley = paint.layout_no_wrap(text.clone(), FontId::proportional(font), Color32::PLACEHOLDER);
+            let size = galley.size();
+            let fits = (size.x * 0.5).hypot(y.abs() + size.y * 0.5) <= radius;
+            if fits { return RamTextRow { galley, y }; }
+            if font > 7.0 { font = (font - 0.25).max(7.0); }
+            else if text != "…" { text = "…".into(); }
+            else { return RamTextRow { galley, y }; }
+        }
+    }).collect()
+}
 fn disk_gauge(disk: &DiskMetric, mode: DiskMode, scale_mbps: f64, p: Palette) -> Gauge {
     let speed = mode == DiskMode::Speed;
     let label = disk.mount.trim_end_matches(['\\', '/']);
@@ -723,6 +782,7 @@ fn disk_gauge(disk: &DiskMetric, mode: DiskMode, scale_mbps: f64, p: Palette) ->
             else if disk.total > 0 { compact(gib(disk.used)) } else { "—".into() },
         detail: if speed { format!("↑ {}", disk_rate_text(write)) }
             else { format!("из {} ГБ", compact(gib(disk.total))) },
+        footer: None,
         outer: ratio(disk.used, disk.total),
         inner: if speed { disk_speed_fraction(read, write, scale_mbps) } else { None },
         accent: p.blue, secondary: if speed { p.purple } else { p.blue },
@@ -778,19 +838,19 @@ pub mod gallery {
     use crate::model::DiskMetric;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Scene { HeroHorizontal, ThemeLight, Vertical, Settings, GpuMemory, DiskSpeed }
+    pub enum Scene { HeroHorizontal, ThemeLight, Vertical, Settings, GpuMemory, DiskSpeed, RamMemory }
 
     impl Scene {
         pub fn parse(name: &str) -> Option<Self> { match name {
             "hero-horizontal" | "horizontal-neon" => Some(Self::HeroHorizontal),
             "theme-light" | "horizontal-light" => Some(Self::ThemeLight),
             "vertical" => Some(Self::Vertical), "settings" => Some(Self::Settings), "gpu-memory" => Some(Self::GpuMemory),
-            "disk-speed" => Some(Self::DiskSpeed), _ => None,
+            "disk-speed" => Some(Self::DiskSpeed), "ram-memory" => Some(Self::RamMemory), _ => None,
         }}
 
         pub fn canvas(self) -> [f32; 2] { match self {
             Self::HeroHorizontal | Self::ThemeLight => [900.0, 200.0],
-            Self::Vertical => [420.0, 800.0], Self::Settings => [520.0, 980.0], Self::GpuMemory => [320.0, 190.0],
+            Self::Vertical => [420.0, 800.0], Self::Settings => [520.0, 980.0], Self::GpuMemory | Self::RamMemory => [320.0, 190.0],
             Self::DiskSpeed => [620.0, 240.0],
         }}
     }
@@ -819,6 +879,7 @@ pub mod gallery {
                 gpu_memory_used: Some((3.4 * gib as f64) as u64), gpu_memory_total: Some(12 * gib),
                 gpu_memory_source: "NVIDIA NVML v2".into(),
                 ram_used: (12.8 * gib as f64) as u64, ram_total: 32 * gib,
+                ram_available: Some(32 * gib - (12.8 * gib as f64) as u64),
                 disks: vec![DiskMetric { mount: "C:\\".into(), used: 186 * gib, total: 476 * gib,
                     read_bps: Some(125_400_000.0), write_bps: Some(42_600_000.0) },
                     DiskMetric { mount: "D:\\".into(), used: 742 * gib, total: 1000 * gib, ..DiskMetric::default() }],
@@ -865,11 +926,11 @@ pub mod gallery {
                         }
                     }
                 });
-            } else if self.scene == Scene::GpuMemory {
+            } else if self.scene == Scene::GpuMemory || self.scene == Scene::RamMemory {
                 let palette = Palette::new(self.app.config.theme);
                 let gauges = self.app.gauges(palette);
                 egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
-                    if let Some(gauge) = gauges.first() {
+                    if let Some(gauge) = if self.scene == Scene::RamMemory { gauges.iter().find(|g| g.id == "ram") } else { gauges.first() } {
                         for (x, diameter) in [(28.0, 83.0), (155.0, 128.0)] {
                             let min = Pos2::new(x, 95.0 - diameter / 2.0);
                             let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), gauge, palette, 1.0 / 60.0);
@@ -917,6 +978,62 @@ pub mod gallery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ram_circle_keeps_used_total_available_and_percent_from_one_snapshot() {
+        let gib = 1_073_741_824;
+        let mut m = Metrics { ram_used: (12.8 * gib as f64) as u64, ram_total: 32 * gib, ..Metrics::default() };
+        m.ram_available = Some(m.ram_total - m.ram_used);
+        let p = Palette::new(Theme::Neon);
+        let gauge = ram_gauge(&m, p);
+        assert_eq!(gauge.label, "ОЗУ · 40%");
+        assert_eq!(gauge.main, "12,8");
+        assert_eq!(gauge.detail, "из 32 ГБ");
+        assert_eq!(gauge.footer.as_deref(), Some("дост. 19,2 ГБ"));
+        assert!((gauge.outer.unwrap() - 0.4).abs() < 0.0001);
+        m.ram_used = m.ram_total;
+        m.ram_available = Some(0);
+        let full = ram_gauge(&m, p);
+        assert_eq!(full.label, "ОЗУ · 100%");
+        assert_eq!(full.footer.as_deref(), Some("дост. 0,0 ГБ"));
+        assert_eq!(full.outer, Some(1.0));
+        m.ram_available = None;
+        let missing = ram_gauge(&m, p);
+        assert_eq!(missing.main, "—");
+        assert_eq!(missing.outer, None);
+        assert_eq!(missing.label, "ОЗУ · —");
+        m.ram_available = Some(1);
+        assert_eq!(ram_gauge(&m, p).outer, None); // Inconsistent snapshots cannot yield a plausible load.
+    }
+
+    #[test]
+    fn ram_rows_stay_inside_the_ring_without_overlapping_at_compact_sizes() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let paint = ctx.layer_painter(egui::LayerId::background());
+            for diameter in [48.0_f32, 64.0, 80.0, 83.0, 128.0, 220.0] {
+                let radius = diameter * 0.5 - 4.0 - (diameter * 0.043).clamp(3.5, 8.0) * 0.5 - 2.0;
+                for total_gib in [16, 32, 128, 1024] {
+                    for fraction in [0.0_f64, 0.4, 1.0] {
+                        let mut m = Metrics { ram_total: total_gib * 1_073_741_824, ..Metrics::default() };
+                        m.ram_used = (m.ram_total as f64 * fraction) as u64;
+                        m.ram_available = Some(m.ram_total - m.ram_used);
+                        let rows = ram_text_rows(&paint, &ram_gauge(&m, Palette::new(Theme::Neon)), diameter, radius);
+                        for row in &rows {
+                            let size = row.galley.size();
+                            assert!((size.x * 0.5).hypot(row.y.abs() + size.y * 0.5) <= radius + 0.1,
+                                "{diameter} px: {}", row.galley.text());
+                            if diameter >= 80.0 { assert_ne!(row.galley.text(), "…"); }
+                        }
+                        for pair in rows.windows(2) {
+                            assert!(pair[0].y + pair[0].galley.size().y * 0.5 <= pair[1].y - pair[1].galley.size().y * 0.5 + 0.1,
+                                "{diameter} px: {} / {}", pair[0].galley.text(), pair[1].galley.text());
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     #[test]
     fn disk_modes_keep_capacity_and_never_substitute_unknown_speeds() {

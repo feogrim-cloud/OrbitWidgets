@@ -1,5 +1,19 @@
 # Changelog / Изменения
 
+## 1.1.7 — 2026-10-27
+
+### English
+
+- Added occupied RAM percentage to the existing circle header and available physical memory to its bottom line, keeping used memory in the center and total capacity visible below it in the same circle.
+- Used one consistent RAM snapshot every 500 ms for the numbers and occupied-memory ring. Available physical memory includes the reclaimable part of the Windows cache.
+- Added a compact RAM gallery scene at 83 and 128 px.
+
+### Русский
+
+- В заголовок существующего круга ОЗУ добавлен процент занятой памяти, в нижнюю строку — доступная физическая память. Занятый объём остаётся в центре, общий объём — видимой строкой под ним в том же круге.
+- Числа и кольцо заполнения используют единый снимок ОЗУ каждые 500 мс. Доступная физическая память включает возвращаемую часть кэша Windows.
+- Добавлена иллюстрация круга ОЗУ при размере 83 и 128 px.
+
 ## 1.1.6 — 2026-10-27
 
 ### English

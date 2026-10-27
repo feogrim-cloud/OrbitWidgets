@@ -42,10 +42,15 @@ Windows x86, Windows ARM64 and Linux packages are not provided. There is no auto
 
 [![Drive capacity and read/write speed modes](assets/screenshots/disk-speed.png)](assets/screenshots/disk-speed.png)
 
+**RAM use, percentage and available memory at 83 and 128 px**
+
+[![RAM circle with occupied percentage and available physical memory](assets/screenshots/ram-memory.png)](assets/screenshots/ram-memory.png)
+
 ## Features
 
 - **CPU and GPU:** load on the outer ring, temperature on the inner ring. The Russian GPU label is **ГП**.
-- **Memory:** used and total RAM; **drives:** a **Объём / Скорость** (Capacity / Speed) switch for occupied/total capacity or current read/write speeds per drive letter, with individual visibility switches. The outer ring always shows occupied space; in Speed mode the inner ring shows combined read/write throughput against an adjustable scale, initially 1000 MB/s. This scale is not a disk utilization percentage.
+- **Memory:** occupied percentage in the header, used RAM in the center, total capacity below it and available physical memory on the bottom line of the same circle. The outer ring shows occupied memory; the tooltip also lists all capacities with units. Available memory includes the reclaimable part of the Windows cache. All RAM values use the same snapshot, updated every 500 ms.
+- **Drives:** a **Объём / Скорость** (Capacity / Speed) switch for occupied/total capacity or current read/write speeds per drive letter, with individual visibility switches. The outer ring always shows occupied space; in Speed mode the inner ring shows combined read/write throughput against an adjustable scale, initially 1000 MB/s. This scale is not a disk utilization percentage.
 - **Network:** current receive and send traffic in **Mbit/s or MB/s**, automatic Ethernet/Wi-Fi selection or a chosen adapter, and an adjustable ring scale. This is adapter traffic, including local-network transfers; it is not an Internet speed test.
 - Independent switches for load, temperature, memory, drives and network.
 - Vertical and horizontal layouts, automatic wrapping when space is limited, adjustable circle size, spacing and opacity.

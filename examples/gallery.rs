@@ -30,7 +30,7 @@ mod platform {
 }
 
 fn usage() -> ! {
-    eprintln!("gallery --scene hero-horizontal|theme-light|vertical|settings|gpu-memory|disk-speed --output FILE.png");
+    eprintln!("gallery --scene hero-horizontal|theme-light|vertical|settings|gpu-memory|disk-speed|ram-memory --output FILE.png");
     std::process::exit(2);
 }
 

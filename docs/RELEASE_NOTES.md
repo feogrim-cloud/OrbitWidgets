@@ -1,6 +1,12 @@
-# Orbit Widgets v1.1.6
+# Orbit Widgets v1.1.7
 
 ## Интерфейс / Interface
+
+**1.1.7:** the RAM circle now shows occupied percentage in its header and available physical memory on its bottom line. Used memory remains in the center, and total capacity stays visible directly below it in the same circle. The tooltip also lists all capacities with units. All RAM values and the outer occupied-memory ring use one snapshot every 500 ms; available memory includes the reclaimable part of the Windows cache.
+
+**1.1.7:** в заголовке круга ОЗУ добавлен процент занятой памяти, нижней строкой — доступная физическая память. Занятый объём остаётся в центре, общий объём — видимой строкой под ним в том же круге. Подсказка также перечисляет все объёмы с единицами. Все показания ОЗУ и внешнее кольцо заполнения используют единый снимок каждые 500 мс; доступная память включает возвращаемую часть кэша Windows.
+
+[![ОЗУ: процент и доступная память, 83 и 128 px · RAM percentage and available memory at 83 and 128 px](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/ram-memory.png)](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/ram-memory.png)
 
 **1.1.6:** disk circles now offer **Объём / Скорость** (Capacity / Speed). Read and write speeds are sampled per drive letter once per second from Windows LogicalDisk counters. The outer ring keeps occupied space; the inner ring in Speed mode shows combined read/write throughput against an adjustable scale, initially 1000 decimal MB/s. Existing profiles retain Capacity mode and their drive visibility.
 
