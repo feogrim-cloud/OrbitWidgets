@@ -1,4 +1,4 @@
-use crate::{gpu_windows::{same_adapter_name, WindowsGpuUsage}, model::{DiskMetric, Metrics}};
+use crate::{disk_windows::WindowsDiskSpeeds, gpu_windows::{same_adapter_name, WindowsGpuUsage}, model::{DiskMetric, Metrics}};
 pub use crate::model::MonitorCommand;
 use libloading::Library;
 use serde::Deserialize;
@@ -41,11 +41,26 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
         let mut network = NetworkSampler::default();
         let mut selected_network = None;
         let (disk_tx, disk_rx) = mpsc::channel();
-        thread::Builder::new().name("orbit-disks".into()).spawn(move || loop {
-            if disk_tx.send(read_disks()).is_err() { break; }
-            thread::sleep(Duration::from_secs(5));
+        thread::Builder::new().name("orbit-disks".into()).spawn(move || {
+            let mut disks = Vec::new();
+            let mut capacity_updated = None;
+            let mut speeds = WindowsDiskSpeeds::default();
+            let mut next_sample = Instant::now();
+            loop {
+                // Capacity and volume discovery do not need one-second polling.
+                // Keep potentially slow removable-volume calls off the main worker.
+                if capacity_updated.map_or(true, |time: Instant| time.elapsed() >= Duration::from_secs(5)) {
+                    disks = read_disks();
+                    capacity_updated = Some(Instant::now());
+                }
+                thread::sleep(next_sample.saturating_duration_since(Instant::now()));
+                speeds.sample(&mut disks);
+                next_sample = Instant::now() + Duration::from_secs(1);
+                if disk_tx.send((Instant::now(), disks.clone())).is_err() { break; }
+            }
         }).ok();
         let mut disks = Vec::new();
+        let mut disks_updated = None;
         // Seed cumulative network counters before the first timed sample.
         network.sample(None);
         loop {
@@ -63,7 +78,11 @@ pub fn start_monitor() -> (Receiver<Metrics>, Sender<MonitorCommand>) {
             }
             system.refresh_cpu_usage();
             system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-            while let Ok(value) = disk_rx.try_recv() { disks = value; }
+            while let Ok((updated, value)) = disk_rx.try_recv() { disks = value; disks_updated = Some(updated); }
+            // A stalled or failed disk worker must not freeze a live speed value.
+            if disks_updated.is_some_and(|time: Instant| time.elapsed() >= Duration::from_secs(3)) {
+                for disk in &mut disks { disk.read_bps = None; disk.write_bps = None; }
+            }
             if let Some(child) = helper.as_mut() {
                 child.check_exit(&helper_state);
             }
@@ -473,7 +492,7 @@ fn read_disks() -> Vec<DiskMetric> {
         if ![2, 3, 6].contains(&kind) { continue; }
         let (mut available, mut total, mut free) = (0u64, 0u64, 0u64);
         if unsafe { native::GetDiskFreeSpaceExW(root.as_ptr(), &mut available, &mut total, &mut free) } != 0 && total > 0 {
-            result.push(DiskMetric { mount, used: total.saturating_sub(free), total });
+            result.push(DiskMetric { mount, used: total.saturating_sub(free), total, ..DiskMetric::default() });
         }
     }
     result

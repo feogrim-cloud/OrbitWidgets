@@ -3,7 +3,7 @@
 <p align="center">Circular performance widgets for your Windows desktop.</p>
 <p align="center"><strong>English</strong> · <a href="README.ru.md">Русский</a></p>
 
-Orbit Widgets displays CPU and GPU load and temperature, memory use, occupied drive space and network traffic in transparent desktop circles. The **dual-ring** design combines related readings without a surrounding panel. The current application interface is in Russian.
+Orbit Widgets displays CPU and GPU load and temperature, memory use, occupied drive space, current drive read/write speeds and network traffic in transparent desktop circles. The **dual-ring** design combines related readings without a surrounding panel. The current application interface is in Russian.
 
 **[Download the latest release](https://github.com/feogrim-cloud/OrbitWidgets/releases/latest)** · [Build from source](docs/BUILD.md) · [Report an issue](https://github.com/feogrim-cloud/OrbitWidgets/issues)
 
@@ -38,10 +38,14 @@ Windows x86, Windows ARM64 and Linux packages are not provided. There is no auto
   </tr>
 </table>
 
+**Drive capacity and live speed at 83 and 128 px**
+
+[![Drive capacity and read/write speed modes](assets/screenshots/disk-speed.png)](assets/screenshots/disk-speed.png)
+
 ## Features
 
 - **CPU and GPU:** load on the outer ring, temperature on the inner ring. The Russian GPU label is **ГП**.
-- **Memory:** used and total RAM; **drives:** occupied and total capacity for each detected drive letter, with individual visibility switches.
+- **Memory:** used and total RAM; **drives:** a **Объём / Скорость** (Capacity / Speed) switch for occupied/total capacity or current read/write speeds per drive letter, with individual visibility switches. The outer ring always shows occupied space; in Speed mode the inner ring shows combined read/write throughput against an adjustable scale, initially 1000 MB/s. This scale is not a disk utilization percentage.
 - **Network:** current receive and send traffic in **Mbit/s or MB/s**, automatic Ethernet/Wi-Fi selection or a chosen adapter, and an adjustable ring scale. This is adapter traffic, including local-network transfers; it is not an Internet speed test.
 - Independent switches for load, temperature, memory, drives and network.
 - Vertical and horizontal layouts, automatic wrapping when space is limited, adjustable circle size, spacing and opacity.
@@ -67,7 +71,9 @@ A new profile places the widgets vertically at the **right-center of a secondary
 | Open Settings | Right-click any circle, or use the notification-area icon |
 | Exit | Notification-area menu → **Выход** |
 
-CPU/GPU load, memory and network are sampled every **500 ms**. The sensor helper updates once a second; drive space updates every five seconds. Ring motion is smoothed independently of sampling. RAM and drive values use binary gigabytes (1024³ bytes), displayed as **ГБ**; network megabytes use 1,000,000 bytes, and 1 MB/s equals 8 Mbit/s.
+CPU/GPU load, memory and network are sampled every **500 ms**. The sensor helper and drive read/write speeds update **once a second**; drive space updates every five seconds. Drive speeds come from Windows LogicalDisk performance counters. An unavailable speed appears as **—**, while an idle drive can report zero. Ring motion is smoothed independently of sampling. RAM and drive capacities use binary gigabytes (1024³ bytes), displayed as **ГБ**; drive and network speeds use decimal megabytes of 1,000,000 bytes, and 1 MB/s equals 8 Mbit/s.
+
+In Settings, enable **Диски по буквам** and choose **Объём** or **Скорость**. Speed mode uses **↓** for reading and **↑** for writing; hover over a circle for capacity and both speeds. Existing profiles retain Capacity mode and their selected drive visibility until you change them.
 
 ## Sensor availability
 

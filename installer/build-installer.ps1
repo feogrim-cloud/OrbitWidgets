@@ -2,7 +2,7 @@ param(
     [string]$SourceDir,
     [string]$OutputDir,
     [string]$Compiler,
-    [string]$AppVersion = '1.1.5',
+    [string]$AppVersion = '1.1.6',
     [switch]$QA
 )
 $ErrorActionPreference = 'Stop'

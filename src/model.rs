@@ -5,6 +5,9 @@ pub struct DiskMetric {
     pub mount: String,
     pub used: u64,
     pub total: u64,
+    /// Current logical-volume throughput. Missing/warmup counters stay unknown.
+    pub read_bps: Option<f64>,
+    pub write_bps: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]

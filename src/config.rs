@@ -11,6 +11,9 @@ pub enum Theme { Midnight, #[default] Light, Neon, Mono }
 pub enum NetworkUnit { #[default] Megabits, Megabytes }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiskMode { #[default] Volume, Speed }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Anchor {
     #[default] Free,
     TopLeft, TopCenter, TopRight,
@@ -41,6 +44,9 @@ pub struct Config {
     pub ram: bool,
     pub disks: bool,
     pub hidden_disks: Vec<String>,
+    pub disk_mode: DiskMode,
+    /// Decimal megabytes per second; scales animation without limiting the numbers.
+    pub disk_scale_mbps: f64,
     pub network: bool,
     pub network_adapter: Option<String>,
     pub network_unit: NetworkUnit,
@@ -61,7 +67,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self { Self {
         cpu_usage: true, cpu_temp: true, gpu_usage: true, gpu_temp: true, gpu_memory: true,
-        ram: true, disks: true, hidden_disks: Vec::new(), network: true,
+        ram: true, disks: true, hidden_disks: Vec::new(), disk_mode: DiskMode::Volume,
+        disk_scale_mbps: 1000.0, network: true,
         network_adapter: None, network_unit: NetworkUnit::Megabits,
         network_scale_mbps: 100.0, layout: Layout::Vertical, diameter: 128.0,
         gap: 14.0, opacity: 0.94, theme: Theme::Light,
@@ -105,6 +112,8 @@ impl Config {
         config.margin = finite_clamp(config.margin, 0.0, 120.0, 24.0);
         if !config.network_scale_mbps.is_finite() { config.network_scale_mbps = 100.0; }
         config.network_scale_mbps = config.network_scale_mbps.clamp(1.0, 100_000.0);
+        if !config.disk_scale_mbps.is_finite() { config.disk_scale_mbps = 1000.0; }
+        config.disk_scale_mbps = config.disk_scale_mbps.clamp(1.0, 100_000.0);
         config
     }
 
@@ -217,6 +226,25 @@ mod tests {
         assert_eq!(config.opacity, 0.74);
         assert_eq!(config.monitor_index, 1);
         assert_eq!(config.margin, 10.0);
+    }
+
+    #[test]
+    fn disk_mode_preserves_old_profiles_and_survives_saving() {
+        let mut old = serde_json::to_value(neon_config()).unwrap();
+        old.as_object_mut().unwrap().remove("disk_mode");
+        old.as_object_mut().unwrap().remove("disk_scale_mbps");
+        let mut restored: Config = serde_json::from_value(old).unwrap();
+        assert_eq!(restored.disk_mode, DiskMode::Volume);
+        assert_eq!(restored.disk_scale_mbps, 1000.0);
+        assert_neon(restored.clone());
+        restored.disk_mode = DiskMode::Speed;
+        restored.disk_scale_mbps = 550.0;
+        let directory = TestDirectory::new();
+        restored.save_to(&directory.profile()).unwrap();
+        let loaded = Config::load_from(&directory.profile());
+        assert_eq!(loaded.disk_mode, DiskMode::Speed);
+        assert_eq!(loaded.disk_scale_mbps, 550.0);
+        assert_neon(loaded);
     }
 
     #[test]

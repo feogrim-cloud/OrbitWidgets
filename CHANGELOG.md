@@ -1,5 +1,19 @@
 # Changelog / Изменения
 
+## 1.1.6 — 2026-10-27
+
+### English
+
+- Added a Capacity / Speed switch for disk circles, with per-letter read and write rates from Windows LogicalDisk counters sampled once per second.
+- Kept occupied space on the outer ring. Speed mode displays separate read/write lines and animates combined throughput on the inner ring against an adjustable decimal-MB/s scale, initially 1000 MB/s.
+- Preserved the capacity view and individual drive visibility in existing profiles. Unknown readings remain unavailable rather than becoming zero.
+
+### Русский
+
+- Добавлен переключатель «Объём / Скорость» для кругов дисков. Скорости чтения и записи по буквам поступают из счётчиков Windows LogicalDisk раз в секунду.
+- Внешнее кольцо сохраняет заполненность диска. В режиме скорости показаны отдельные строки чтения и записи, а внутреннее кольцо плавно показывает их сумму относительно настраиваемой шкалы, по умолчанию 1000 МБ/с.
+- Старые профили сохраняют режим объёма и видимость отдельных дисков. Недоступные показания не подменяются нулём.
+
 ## 1.1.5 — 2026-10-27
 
 ### English

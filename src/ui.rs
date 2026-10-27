@@ -1,6 +1,6 @@
 use crate::{
-    config::{Anchor, Config, Layout, NetworkUnit, Theme},
-    model::{Metrics, MonitorCommand},
+    config::{Anchor, Config, DiskMode, Layout, NetworkUnit, Theme},
+    model::{DiskMetric, Metrics, MonitorCommand},
     startup::StartupStatus,
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -287,15 +287,7 @@ impl WidgetApp {
         if self.config.disks {
             for disk in &m.disks {
                 if self.config.hidden_disks.contains(&disk.mount) { continue; }
-                let label = disk.mount.trim_end_matches(['\\', '/']).to_owned();
-                gauges.push(Gauge {
-                    id: format!("disk-{}", disk.mount), label,
-                    main: if disk.total > 0 { compact(gib(disk.used)) } else { "—".into() },
-                    detail: format!("из {} ГБ", compact(gib(disk.total))),
-                    outer: ratio(disk.used, disk.total), inner: None, accent: p.blue, secondary: p.blue,
-                    tooltip: format!("Том {}\nЗанято: {:.1} ГБ\nВсего: {:.1} ГБ\nСвободно: {:.1} ГБ",
-                        disk.mount, gib(disk.used), gib(disk.total), gib(disk.total.saturating_sub(disk.used))),
-                });
+                gauges.push(disk_gauge(disk, self.config.disk_mode, self.config.disk_scale_mbps, p));
             }
         }
         if self.config.network {
@@ -350,7 +342,8 @@ impl WidgetApp {
         // Both tracks stay visible for missing sensors, with an explicit dash in the label.
         let outer_enabled = match gauge.id.as_str() { "cpu" => self.config.cpu_usage,
             "gpu" => self.config.gpu_usage || (self.config.gpu_memory && !self.config.gpu_temp), _ => true };
-        let inner_enabled = match gauge.id.as_str() { "cpu" => self.config.cpu_temp, "gpu" => self.config.gpu_temp, "network" => true, _ => false };
+        let disk_speed_layout = gauge.id.starts_with("disk-") && self.config.disk_mode == DiskMode::Speed;
+        let inner_enabled = match gauge.id.as_str() { "cpu" => self.config.cpu_temp, "gpu" => self.config.gpu_temp, "network" => true, _ => disk_speed_layout };
         if outer_enabled {
             paint.circle_stroke(center, radius, Stroke::new(outer_width, alpha(palette.track, opacity)));
             if gauge.outer.is_some() { draw_arc(paint, center, radius, smooth[0], outer_width, alpha(gauge.accent, opacity)); }
@@ -361,18 +354,33 @@ impl WidgetApp {
         }
         let scale = diameter / 128.0;
         let gpu_memory_layout = gauge.id == "gpu" && self.config.gpu_memory;
-        let header_y = if gpu_memory_layout { -25.0 * scale } else { -27.0 * scale };
-        let header_font = if gpu_memory_layout { fitted_gauge_font(paint, &gauge.label, (11.0 * scale).max(9.0), text_chord_width(inner_radius, header_y)) }
+        let header = if disk_speed_layout && diameter < 72.0 { gauge.label.split(" · ").next().unwrap_or(&gauge.label) }
+            else { &gauge.label };
+        let mut main = gauge.main.clone();
+        let mut detail = gauge.detail.clone();
+        let header_y = if gpu_memory_layout || disk_speed_layout { -25.0 * scale } else { -27.0 * scale };
+        let header_font = if gpu_memory_layout || disk_speed_layout { fitted_gauge_font(paint, header, (11.0 * scale).max(9.0), text_chord_width(inner_radius, header_y)) }
             else { (11.0 * scale).max(9.0) };
-        paint.text(center + Vec2::new(0.0, header_y), Align2::CENTER_CENTER, &gauge.label,
+        paint.text(center + Vec2::new(0.0, header_y), Align2::CENTER_CENTER, header,
             FontId::proportional(header_font), alpha(palette.muted, opacity));
         let main_font = if gauge.main.chars().count() > 6 { 21.0 } else if gpu_memory_layout { 26.0 } else { 28.0 };
-        paint.text(center + Vec2::new(0.0, -2.0 * scale), Align2::CENTER_CENTER, &gauge.main,
-            FontId::proportional(main_font * scale), alpha(palette.text, opacity));
-        let detail_font = if gpu_memory_layout { fitted_gauge_font(paint, &gauge.detail, (12.0 * scale).max(9.0), text_chord_width(inner_radius, 23.0 * scale)) }
+        let main_y = if disk_speed_layout { -4.0 * scale } else { -2.0 * scale };
+        let main_font = if disk_speed_layout {
+            let row = disk_row_layout(paint, &main, diameter, text_chord_width(inner_radius, main_y));
+            main = row.0; row.1
+        }
+            else { main_font * scale };
+        paint.text(center + Vec2::new(0.0, main_y), Align2::CENTER_CENTER, &main,
+            FontId::proportional(main_font), alpha(if disk_speed_layout { gauge.accent } else { palette.text }, opacity));
+        let detail_y = if disk_speed_layout { 20.0 * scale } else { 23.0 * scale };
+        let detail_font = if disk_speed_layout {
+            let row = disk_row_layout(paint, &detail, diameter, text_chord_width(inner_radius, detail_y));
+            detail = row.0; row.1
+        }
+            else if gpu_memory_layout { fitted_gauge_font(paint, &gauge.detail, (12.0 * scale).max(9.0), text_chord_width(inner_radius, detail_y)) }
             else { (12.0 * scale).max(9.0) };
-        paint.text(center + Vec2::new(0.0, 23.0 * scale), Align2::CENTER_CENTER, &gauge.detail,
-            FontId::proportional(detail_font), alpha(if gauge.inner.is_some() && !gpu_memory_layout { gauge.secondary } else { palette.muted }, opacity));
+        paint.text(center + Vec2::new(0.0, detail_y), Align2::CENTER_CENTER, &detail,
+            FontId::proportional(detail_font), alpha(if disk_speed_layout || (gauge.inner.is_some() && !gpu_memory_layout) { gauge.secondary } else { palette.muted }, opacity));
         let hovered = response.hovered() && !response.dragged()
             && ui.input(|input| !input.pointer.any_down())
             && response.hover_pos().is_some_and(|position| position.distance(center) <= radius);
@@ -438,6 +446,18 @@ impl WidgetApp {
                 ui.checkbox(&mut self.config.gpu_memory, "ГП · видеопамять");
                 ui.checkbox(&mut self.config.disks, "Диски по буквам");
                 if self.config.disks {
+                    ui.horizontal(|ui| {
+                        ui.label("Показания дисков");
+                        ui.selectable_value(&mut self.config.disk_mode, DiskMode::Volume, "Объём");
+                        ui.selectable_value(&mut self.config.disk_mode, DiskMode::Speed, "Скорость");
+                    });
+                    if self.config.disk_mode == DiskMode::Speed {
+                        ui.horizontal(|ui| {
+                            ui.label("Шкала скорости");
+                            ui.add(egui::DragValue::new(&mut self.config.disk_scale_mbps).range(1.0..=100_000.0).speed(10.0).suffix(" МБ/с"));
+                        });
+                        ui.small("↓ чтение · ↑ запись. Внешний контур — занятое место, внутренний — суммарная скорость. Шкала влияет только на контур.");
+                    }
                     ui.horizontal_wrapped(|ui| {
                         for disk in &self.metrics.disks {
                             let mut enabled = !self.config.hidden_disks.contains(&disk.mount);
@@ -512,8 +532,8 @@ impl WidgetApp {
                 ui.add_space(12.0); ui.separator(); ui.add_space(5.0);
                 self.startup_settings(ui);
                 ui.add_space(12.0); ui.separator(); ui.add_space(5.0);
-                ui.small("Данные: нагрузка, ОЗУ и сеть — каждые 0,5 с; температуры — 1 с; место на дисках — 5 с. Значок «—» означает, что датчик пока недоступен.");
-                ui.small("Объёмы памяти и дисков: 1 ГБ = 1024³ байт. Сеть: 1 МБ = 1 000 000 байт.");
+                ui.small("Данные: нагрузка, ОЗУ и сеть — каждые 0,5 с; температуры и скорость дисков — 1 с; место на дисках — 5 с. Значок «—» означает, что датчик пока недоступен.");
+                ui.small("Объёмы памяти и дисков: 1 ГБ = 1024³ байт. Скорость дисков и сети: 1 МБ = 1 000 000 байт.");
                 if let Some(error) = &self.save_error { ui.colored_label(Color32::from_rgb(245, 130, 115), format!("Не удалось сохранить настройки: {error}")); }
                 ui.add_space(7.0);
                 ui.horizontal(|ui| {
@@ -691,6 +711,64 @@ fn temperature(value: Option<f32>) -> String { value.filter(|v| v.is_finite()).m
 fn heat_color(temp: Option<f32>, normal: Color32) -> Color32 { if temp.is_some_and(|t| t >= 85.0) { Color32::from_rgb(255, 102, 111) } else { normal } }
 fn gib(bytes: u64) -> f64 { bytes as f64 / 1_073_741_824.0 }
 fn compact(value: f64) -> String { (if value >= 100.0 { format!("{value:.0}") } else if value >= 10.0 { format!("{value:.1}") } else { format!("{value:.2}") }).replace('.', ",") }
+fn disk_gauge(disk: &DiskMetric, mode: DiskMode, scale_mbps: f64, p: Palette) -> Gauge {
+    let speed = mode == DiskMode::Speed;
+    let label = disk.mount.trim_end_matches(['\\', '/']);
+    let read = valid_disk_rate(disk.read_bps);
+    let write = valid_disk_rate(disk.write_bps);
+    Gauge {
+        id: format!("disk-{}-{}", disk.mount, if speed { "speed" } else { "volume" }),
+        label: if speed { format!("{label} · МБ/с") } else { label.into() },
+        main: if speed { format!("↓ {}", disk_rate_text(read)) }
+            else if disk.total > 0 { compact(gib(disk.used)) } else { "—".into() },
+        detail: if speed { format!("↑ {}", disk_rate_text(write)) }
+            else { format!("из {} ГБ", compact(gib(disk.total))) },
+        outer: ratio(disk.used, disk.total),
+        inner: if speed { disk_speed_fraction(read, write, scale_mbps) } else { None },
+        accent: p.blue, secondary: if speed { p.purple } else { p.blue },
+        tooltip: format!("Том {}\nЗанято: {:.1} ГБ\nВсего: {:.1} ГБ\nСвободно: {:.1} ГБ\n↓ Чтение: {} МБ/с\n↑ Запись: {} МБ/с\nИсточник скорости: счётчики Windows, обновление раз в секунду.\n{}",
+            disk.mount, gib(disk.used), gib(disk.total), gib(disk.total.saturating_sub(disk.used)),
+            disk_rate_text(read), disk_rate_text(write), if speed {
+                format!("Внешний контур — занятое место. Внутренний — чтение + запись; максимум шкалы {} МБ/с.", compact(scale_mbps))
+            } else { "Внешний контур — занятое место.".into() }),
+    }
+}
+// Automatic layout may shrink below the diameter slider's minimum. Keep the
+// full values and units in the tooltip while retaining readable tiny rows.
+fn compact_disk_line(line: &str, diameter: f32) -> String {
+    if diameter >= 72.0 { return line.into(); }
+    let Some((arrow, number)) = line.split_once(' ') else { return line.into(); };
+    if let Ok(value) = number.replace(',', ".").parse::<f64>() {
+        if value >= 1000.0 { return format!("{arrow}{value:.0e}"); }
+    }
+    format!("{arrow}{number}")
+}
+fn disk_row_layout(paint: &egui::Painter, line: &str, diameter: f32, width: f32) -> (String, f32) {
+    let mut text = compact_disk_line(line, diameter);
+    let font = fitted_gauge_font(paint, &text, (20.0 * diameter / 128.0).max(8.0), width);
+    if paint.layout_no_wrap(text.clone(), FontId::proportional(font), Color32::WHITE).size().x > width {
+        // A rare extremely small auto-layout can show less numeric precision;
+        // full values remain in the independent tooltip rather than overlapping.
+        text = if text.contains('<') { format!("{}<1", line.chars().next().unwrap_or(' ')) }
+            else { format!("{}…", line.chars().next().unwrap_or(' ')) };
+    }
+    (text, font)
+}
+fn valid_disk_rate(value: Option<f64>) -> Option<f64> { value.filter(|v| v.is_finite() && *v >= 0.0) }
+fn disk_rate_text(value: Option<f64>) -> String {
+    valid_disk_rate(value).map_or_else(|| "—".into(), |v| {
+        let mb = v / 1_000_000.0;
+        if mb == 0.0 { "0".into() }
+        else if mb < 0.01 { "<0,01".into() }
+        else if mb >= 100_000.0 { format!("{mb:.1e}").replace('.', ",") }
+        else { compact(mb) }
+    })
+}
+fn disk_speed_fraction(read: Option<f64>, write: Option<f64>, scale_mbps: f64) -> Option<f32> {
+    let (read, write) = valid_disk_rate(read).zip(valid_disk_rate(write))?;
+    if !scale_mbps.is_finite() || scale_mbps <= 0.0 { return None; }
+    Some(((read / 1_000_000.0 + write / 1_000_000.0) / scale_mbps).clamp(0.0, 1.0) as f32)
+}
 
 /// Renderer-only documentation scenes. This wrapper deliberately bypasses the
 /// application's constructor, collector, native shell and settings persistence.
@@ -700,18 +778,20 @@ pub mod gallery {
     use crate::model::DiskMetric;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Scene { HeroHorizontal, ThemeLight, Vertical, Settings, GpuMemory }
+    pub enum Scene { HeroHorizontal, ThemeLight, Vertical, Settings, GpuMemory, DiskSpeed }
 
     impl Scene {
         pub fn parse(name: &str) -> Option<Self> { match name {
             "hero-horizontal" | "horizontal-neon" => Some(Self::HeroHorizontal),
             "theme-light" | "horizontal-light" => Some(Self::ThemeLight),
-            "vertical" => Some(Self::Vertical), "settings" => Some(Self::Settings), "gpu-memory" => Some(Self::GpuMemory), _ => None,
+            "vertical" => Some(Self::Vertical), "settings" => Some(Self::Settings), "gpu-memory" => Some(Self::GpuMemory),
+            "disk-speed" => Some(Self::DiskSpeed), _ => None,
         }}
 
         pub fn canvas(self) -> [f32; 2] { match self {
             Self::HeroHorizontal | Self::ThemeLight => [900.0, 200.0],
             Self::Vertical => [420.0, 800.0], Self::Settings => [520.0, 980.0], Self::GpuMemory => [320.0, 190.0],
+            Self::DiskSpeed => [620.0, 240.0],
         }}
     }
 
@@ -739,8 +819,9 @@ pub mod gallery {
                 gpu_memory_used: Some((3.4 * gib as f64) as u64), gpu_memory_total: Some(12 * gib),
                 gpu_memory_source: "NVIDIA NVML v2".into(),
                 ram_used: (12.8 * gib as f64) as u64, ram_total: 32 * gib,
-                disks: vec![DiskMetric { mount: "C:\\".into(), used: 186 * gib, total: 476 * gib },
-                    DiskMetric { mount: "D:\\".into(), used: 742 * gib, total: 1000 * gib }],
+                disks: vec![DiskMetric { mount: "C:\\".into(), used: 186 * gib, total: 476 * gib,
+                    read_bps: Some(125_400_000.0), write_bps: Some(42_600_000.0) },
+                    DiskMetric { mount: "D:\\".into(), used: 742 * gib, total: 1000 * gib, ..DiskMetric::default() }],
                 network_rx_bps: 32.4 * 125_000.0, network_tx_bps: 2.1 * 125_000.0,
                 network_name: "Ethernet".into(), network_interfaces: vec!["Ethernet".into(), "Wi-Fi".into()],
                 temperature_status: "Температура ЦП: MSI Afterburner, общая память".into(),
@@ -769,7 +850,22 @@ pub mod gallery {
             ctx.set_pixels_per_point(1.0);
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.scene.canvas().into()));
             ctx.set_visuals(if self.app.config.theme == Theme::Light { egui::Visuals::light() } else { egui::Visuals::dark() });
-            if self.scene == Scene::GpuMemory {
+            if self.scene == Scene::DiskSpeed {
+                let palette = Palette::new(self.app.config.theme);
+                let disk = self.app.metrics.disks[0].clone();
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                    for (offset, mode, title) in [(0.0, DiskMode::Volume, "Объём"), (310.0, DiskMode::Speed, "Скорость")] {
+                        self.app.config.disk_mode = mode;
+                        let gauge = disk_gauge(&disk, mode, self.app.config.disk_scale_mbps, palette);
+                        ui.painter().text(Pos2::new(offset + 155.0, 25.0), Align2::CENTER_CENTER, title, FontId::proportional(18.0), palette.text);
+                        for (x, diameter) in [(28.0, 83.0), (155.0, 128.0)] {
+                            let min = Pos2::new(offset + x, 125.0 - diameter / 2.0);
+                            let _ = self.app.draw_gauge(ui, Rect::from_min_size(min, Vec2::splat(diameter)), &gauge, palette, 1.0 / 60.0);
+                            ui.painter().text(Pos2::new(offset + x + diameter / 2.0, 210.0), Align2::CENTER_CENTER, format!("{diameter:.0} px"), FontId::proportional(11.0), palette.muted);
+                        }
+                    }
+                });
+            } else if self.scene == Scene::GpuMemory {
                 let palette = Palette::new(self.app.config.theme);
                 let gauges = self.app.gauges(palette);
                 egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
@@ -821,6 +917,56 @@ pub mod gallery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_modes_keep_capacity_and_never_substitute_unknown_speeds() {
+        let palette = Palette::new(Theme::Neon);
+        let mut disk = DiskMetric { mount: "C:\\".into(), used: 186 * 1_073_741_824, total: 476 * 1_073_741_824,
+            read_bps: Some(125_000_000.0), write_bps: Some(42_000_000.0) };
+        let volume = disk_gauge(&disk, DiskMode::Volume, 1000.0, palette);
+        let speed = disk_gauge(&disk, DiskMode::Speed, 1000.0, palette);
+        assert_eq!(volume.main, "186");
+        assert_eq!(volume.detail, "из 476 ГБ");
+        assert_eq!(speed.main, "↓ 125");
+        assert_eq!(speed.detail, "↑ 42,0");
+        assert_eq!(volume.outer, speed.outer);
+        assert_eq!(volume.inner, None);
+        assert!((speed.inner.unwrap() - 0.167).abs() < 0.0001);
+        disk.write_bps = None;
+        let partial = disk_gauge(&disk, DiskMode::Speed, 1000.0, palette);
+        assert_eq!(partial.main, "↓ 125");
+        assert_eq!(partial.detail, "↑ —");
+        assert_eq!(partial.inner, None);
+        assert_eq!(disk_rate_text(Some(0.0)), "0");
+        assert_eq!(disk_rate_text(Some(10.0)), "<0,01");
+        assert_eq!(disk_rate_text(Some(f64::NAN)), "—");
+        assert_eq!(disk_speed_fraction(Some(1.0), Some(1.0), 0.0), None);
+        assert_eq!(disk_speed_fraction(Some(-1.0), Some(0.0), 1000.0), None);
+        assert_eq!(disk_speed_fraction(Some(2_000_000_000.0), Some(0.0), 1000.0), Some(1.0));
+    }
+
+    #[test]
+    fn disk_speed_text_fits_at_normal_and_automatically_reduced_sizes() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let paint = ctx.layer_painter(egui::LayerId::background());
+            for diameter in [48.0_f32, 64.0, 80.0, 83.0, 128.0, 220.0] {
+                let scale = diameter / 128.0;
+                let radius = diameter / 2.0 - 4.0 - (diameter * 0.043).clamp(3.5, 8.0) - diameter * 0.032;
+                let header = if diameter < 72.0 { "C:" } else { "C: · МБ/с" };
+                for line in ["↓ 0", "↑ —", "↓ <0,01", "↓ 99999", "↑ 1,8e302"] {
+                    for y in [-4.0 * scale, 20.0 * scale] {
+                        let width = text_chord_width(radius, y);
+                        let (line, font) = disk_row_layout(&paint, line, diameter, width);
+                        assert!(paint.layout_no_wrap(line.clone(), FontId::proportional(font), Color32::WHITE).size().x <= width + 1.0, "{diameter}: {line}");
+                    }
+                }
+                let width = text_chord_width(radius, -25.0 * scale);
+                let font = fitted_gauge_font(&paint, header, (11.0 * scale).max(9.0), width);
+                assert!(paint.layout_no_wrap(header.into(), FontId::proportional(font), Color32::WHITE).size().x <= width + 1.0, "{diameter}: header");
+            }
+        });
+    }
 
     #[test]
     fn gpu_memory_format_preserves_gib_units_and_unknown_values() {

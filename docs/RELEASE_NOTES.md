@@ -1,6 +1,12 @@
-# Orbit Widgets v1.1.5
+# Orbit Widgets v1.1.6
 
 ## Интерфейс / Interface
+
+**1.1.6:** disk circles now offer **Объём / Скорость** (Capacity / Speed). Read and write speeds are sampled per drive letter once per second from Windows LogicalDisk counters. The outer ring keeps occupied space; the inner ring in Speed mode shows combined read/write throughput against an adjustable scale, initially 1000 decimal MB/s. Existing profiles retain Capacity mode and their drive visibility.
+
+**1.1.6:** в кругах дисков добавлен переключатель **«Объём / Скорость»**. Скорости чтения и записи по буквам поступают из счётчиков Windows LogicalDisk раз в секунду. Внешнее кольцо сохраняет заполненность; внутреннее в режиме скорости показывает сумму чтения и записи относительно настраиваемой шкалы, по умолчанию 1000 МБ/с. Старые профили сохраняют режим объёма и видимость дисков.
+
+[![Объём и скорость диска при 83 и 128 px · Disk capacity and speed at 83 and 128 px](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/disk-speed.png)](https://raw.githubusercontent.com/feogrim-cloud/OrbitWidgets/main/assets/screenshots/disk-speed.png)
 
 **1.1.5:** optional dedicated GPU memory (used / total) inside the GPU circle; temperature moves beside the GPU title when both load and memory are enabled. **1.1.5:** отключаемая строка занятой и общей видеопамяти внутри круга ГП; температура переносится к подписи, когда показаны нагрузка и память. The readings come from the same NVIDIA adapter. Показания относятся к тому же адаптеру NVIDIA.
 
