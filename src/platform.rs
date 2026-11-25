@@ -8,6 +8,19 @@ use windows_sys::Win32::{
 
 fn wide(s: &str) -> Vec<u16> { OsStr::new(s).encode_wide().chain(Some(0)).collect() }
 
+pub fn open_disk(mount: &str) -> Result<(), String> {
+    if !crate::model::is_disk_root(mount) { return Err("Некорректный путь диска.".into()); }
+    // Called on a dedicated worker: shell extensions must not block rendering.
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.ok()
+        .map_err(|error| format!("Не удалось подготовить Проводник: {error}"))?;
+    let path = wide(mount);
+    let result = unsafe { ShellExecuteW(null_mut(), wide("explore").as_ptr(), path.as_ptr(), null(), null(), SW_SHOWNORMAL) } as isize;
+    unsafe { CoUninitialize(); }
+    if result > 32 { Ok(()) }
+    else { Err(format!("Не удалось открыть диск {mount} в Проводнике (код Windows: {result}).")) }
+}
+
 fn taskbar_created_message() -> u32 {
     static MESSAGE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *MESSAGE.get_or_init(|| unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) })
@@ -200,6 +213,18 @@ mod tooltip_tests {
     #[test]
     fn oversized_tooltip_does_not_panic() {
         assert_eq!(place_tooltip([0.0, 0.0, 20.0, 20.0], [324.0, 180.0], [0.0, 0.0, 200.0, 100.0]), [8.0, 8.0]);
+    }
+}
+
+#[cfg(test)]
+mod disk_tests {
+    #[test]
+    fn rejects_paths_that_could_launch_commands_or_escape_a_drive_root() {
+        for mount in ["", "C:", "C:folder", "C:\\folder", "C:/", "\\\\server\\share", "https://example.com", "cmd.exe", "C:\\\0ignored", "C:\\ /select,", "Я:\\"] {
+            assert!(!crate::model::is_disk_root(mount), "{mount:?}");
+            assert!(super::open_disk(mount).is_err());
+        }
+        for mount in ["C:\\", "D:\\", "z:\\"] { assert!(crate::model::is_disk_root(mount)); }
     }
 }
 

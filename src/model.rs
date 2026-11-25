@@ -44,3 +44,9 @@ pub enum MonitorCommand {
     SelectNetwork(Option<String>),
     RefreshSensors,
 }
+
+/// A local drive-letter root, without a command line, URI or relative path.
+pub fn is_disk_root(mount: &str) -> bool {
+    let bytes = mount.as_bytes();
+    bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}

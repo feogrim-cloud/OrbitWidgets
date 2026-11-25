@@ -27,6 +27,8 @@ pub struct WidgetApp {
     settings_open: bool,
     save_at: Option<Instant>,
     save_error: Option<String>,
+    disk_open_error: Option<String>,
+    disk_open_rx: Option<Receiver<Result<(), String>>>,
     last_size: Vec2,
     last_work_area: [f32; 2],
     last_pixels_per_point: f32,
@@ -140,6 +142,7 @@ fn tooltip_text_layout(ctx: &egui::Context, text: &str, color: Color32) -> (Arc<
 #[derive(Clone)]
 struct Gauge {
     id: String,
+    disk_mount: Option<String>,
     label: String,
     main: String,
     detail: String,
@@ -231,6 +234,7 @@ impl WidgetApp {
         let mut app = Self {
             config, rx, commands, signals, metrics: Metrics::default(), last_sample: None,
             settings_open: false, save_at: None, save_error: None, last_size: Vec2::ZERO, last_work_area: [0.0; 2], last_pixels_per_point: 0.0,
+            disk_open_error: None, disk_open_rx: None,
             need_anchor: true, applied_locked: None, applied_top: None, applied_theme: None,
             smoothed: HashMap::new(),
             startup_status: None, startup_rx: None, startup_error: None,
@@ -301,7 +305,7 @@ impl WidgetApp {
         let mut gauges = Vec::new();
         if self.config.cpu_usage || self.config.cpu_temp {
             gauges.push(Gauge {
-                id: "cpu".into(), label: "ЦП".into(),
+                id: "cpu".into(), disk_mount: None, label: "ЦП".into(),
                 main: if self.config.cpu_usage { percent(m.cpu_usage) } else { temperature(m.cpu_temp) },
                 detail: if self.config.cpu_temp && self.config.cpu_usage { temperature(m.cpu_temp) } else { "процессор".into() },
                 footer: None,
@@ -326,7 +330,7 @@ impl WidgetApp {
                         m.gpu_memory_source, ". Учёт служебного резерва может отличаться от Windows."))
             } else { String::new() };
             gauges.push(Gauge {
-                id: "gpu".into(), label,
+                id: "gpu".into(), disk_mount: None, label,
                 main: if self.config.gpu_usage { percent(m.gpu_usage) } else if self.config.gpu_temp { temperature(m.gpu_temp) }
                     else { memory.map_or_else(|| "—".into(), |(used, _)| format!("{:.1}", gib(used)).replace('.', ",")) },
                 detail: if memory_only { memory.map_or_else(|| "видеопамять".into(), |(_, total)| format!("из {} ГБ", memory_total_text(total))) }
@@ -360,7 +364,7 @@ impl WidgetApp {
             let unit = match self.config.network_unit { NetworkUnit::Megabits => "Мбит/с", NetworkUnit::Megabytes => "МБ/с" };
             let maximum = self.config.network_scale_mbps.max(1.0) * 125_000.0;
             gauges.push(Gauge {
-                id: "network".into(), label: format!("СЕТЬ · {unit}"), main: format!("↓ {}", compact(rx / divisor)),
+                id: "network".into(), disk_mount: None, label: format!("СЕТЬ · {unit}"), main: format!("↓ {}", compact(rx / divisor)),
                 detail: format!("↑ {}", compact(tx / divisor)),
                 footer: None,
                 outer: Some((rx / maximum).clamp(0.0, 1.0) as f32),
@@ -371,7 +375,7 @@ impl WidgetApp {
             });
         }
         if gauges.is_empty() {
-            gauges.push(Gauge { id: "empty".into(), label: "ORBIT".into(), main: "···".into(), detail: "правый клик".into(),
+            gauges.push(Gauge { id: "empty".into(), disk_mount: None, label: "ORBIT".into(), main: "···".into(), detail: "правый клик".into(),
                 footer: None, outer: None, inner: None, accent: p.blue, secondary: p.blue, tooltip: "Все виджеты выключены. Правый клик — открыть настройки.".into() });
         }
         if self.last_sample.is_some_and(|sample| sample.elapsed() > Duration::from_secs(4)) {
@@ -454,6 +458,18 @@ impl WidgetApp {
             && ui.input(|input| !input.pointer.any_down())
             && response.hover_pos().is_some_and(|position| position.distance(center) <= radius);
         let tooltip = hovered.then(|| TooltipTarget { id: gauge.id.clone(), text: gauge.tooltip.clone(), rect });
+        if !self.config.locked {
+            if hovered && gauge.disk_mount.is_some() { response.clone().on_hover_cursor(egui::CursorIcon::PointingHand); }
+            if let Some(mount) = clicked_disk(gauge, &response, rect).filter(|_| self.disk_open_rx.is_none()) {
+                let mount = mount.to_owned();
+                let (tx, rx) = mpsc::channel();
+                self.disk_open_error = None;
+                match std::thread::Builder::new().name("open-disk".into()).spawn(move || { let _ = tx.send(crate::platform::open_disk(&mount)); }) {
+                    Ok(_) => self.disk_open_rx = Some(rx),
+                    Err(error) => { self.disk_open_error = Some(format!("Не удалось открыть Проводник: {error}")); self.settings_open = true; }
+                }
+            }
+        }
         // A native settings window can extend beyond the small transparent widget viewport.
         if response.secondary_clicked() { self.settings_open = true; }
         if response.drag_started() && !self.config.locked {
@@ -502,6 +518,7 @@ impl WidgetApp {
         let previous_anchor = (self.config.anchor, self.config.monitor_index, self.config.margin);
         egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.add_space(4.0);
+            if let Some(error) = &self.disk_open_error { ui.colored_label(ui.visuals().error_fg_color, error); }
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.heading("Показатели");
                 egui::Grid::new("enabled-metrics").num_columns(2).spacing([20.0, 5.0]).show(ui, |ui| {
@@ -625,6 +642,16 @@ impl eframe::App for WidgetApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &root_ui.ctx().clone();
         crate::platform::prepare_taskbar_windows();
+        let disk_result = self.disk_open_rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err("Не удалось завершить открытие диска.".into())),
+        });
+        if let Some(result) = disk_result {
+            self.disk_open_rx = None;
+            self.disk_open_error = result.err();
+            if self.disk_open_error.is_some() { self.settings_open = true; }
+        }
         let startup_result = self.startup_rx.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(outcome) => Some(outcome),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -804,7 +831,7 @@ fn ram_gauge(m: &Metrics, p: Palette) -> Gauge {
     let total = if m.ram_total > 0 { format!("{:.0}", gib(m.ram_total)) } else { "—".into() };
     let available_text = available.map_or_else(|| "—".into(), ram_amount);
     Gauge {
-        id: "ram".into(), label: format!("ОЗУ · {}", percent(load)), main: used.clone(),
+        id: "ram".into(), disk_mount: None, label: format!("ОЗУ · {}", percent(load)), main: used.clone(),
         detail: format!("из {total} ГБ"), footer: Some(format!("дост. {available_text} ГБ")),
         outer: fraction, inner: None, accent: p.blue, secondary: p.blue,
         tooltip: format!("Оперативная память\nЗагрузка: {}\nЗанято: {} ГБ\nВсего: {} ГБ\nДоступно: {} ГБ\nДоступная физическая память включает кэш, который Windows может сразу использовать для приложений.\nКонтур — доля занятой памяти. Обновление раз в 1 с.",
@@ -844,13 +871,22 @@ fn ram_text_rows(paint: &egui::Painter, gauge: &Gauge, diameter: f32, radius: f3
         }
     }).collect()
 }
+fn clicked_disk<'a>(gauge: &'a Gauge, response: &egui::Response, rect: Rect) -> Option<&'a str> {
+    let inside = response.interact_pointer_pos().is_some_and(|position| position.distance(rect.center()) <= rect.width() * 0.5 - 4.0);
+    if response.clicked_by(egui::PointerButton::Primary) && inside { gauge.disk_mount.as_deref() } else { None }
+}
+
 fn disk_gauge(disk: &DiskMetric, mode: DiskMode, scale_mbps: f64, p: Palette) -> Gauge {
     let speed = mode == DiskMode::Speed;
     let label = disk.mount.trim_end_matches(['\\', '/']);
+    // The collector stores drive labels ("C:") for stable IDs and settings.
+    // Shell actions require an absolute root ("C:\\"), not a drive-relative path.
+    let root = if disk.mount.len() == 2 { format!("{}\\", disk.mount) } else { disk.mount.clone() };
     let read = valid_disk_rate(disk.read_bps);
     let write = valid_disk_rate(disk.write_bps);
     Gauge {
         id: format!("disk-{}-{}", disk.mount, if speed { "speed" } else { "volume" }),
+        disk_mount: crate::model::is_disk_root(&root).then_some(root),
         label: if speed { format!("{label} · МБ/с") } else { label.into() },
         main: if speed { format!("↓ {}", disk_rate_text(read)) }
             else if disk.total > 0 { compact(gib(disk.used)) } else { "—".into() },
@@ -860,7 +896,7 @@ fn disk_gauge(disk: &DiskMetric, mode: DiskMode, scale_mbps: f64, p: Palette) ->
         outer: ratio(disk.used, disk.total),
         inner: if speed { disk_speed_fraction(read, write, scale_mbps) } else { None },
         accent: p.blue, secondary: if speed { p.purple } else { p.blue },
-        tooltip: format!("Том {}\nЗанято: {:.1} ГБ\nВсего: {:.1} ГБ\nСвободно: {:.1} ГБ\n↓ Чтение: {} МБ/с\n↑ Запись: {} МБ/с\nИсточник скорости: счётчики Windows, обновление раз в секунду.\n{}",
+        tooltip: format!("Том {}\nЗанято: {:.1} ГБ\nВсего: {:.1} ГБ\nСвободно: {:.1} ГБ\n↓ Чтение: {} МБ/с\n↑ Запись: {} МБ/с\nИсточник скорости: счётчики Windows, обновление раз в секунду.\n{}\nЛевый клик — открыть диск в Проводнике.",
             disk.mount, gib(disk.used), gib(disk.total), gib(disk.total.saturating_sub(disk.used)),
             disk_rate_text(read), disk_rate_text(write), if speed {
                 format!("Внешний контур — занятое место. Внутренний — чтение + запись; максимум шкалы {} МБ/с.", compact(scale_mbps))
@@ -968,6 +1004,7 @@ pub mod gallery {
             let app = WidgetApp {
                 config, rx, commands, signals: Arc::new(UiSignals::default()), metrics,
                 last_sample: Some(Instant::now()), settings_open: false, save_at: None, save_error: None,
+                disk_open_error: None, disk_open_rx: None,
                 last_size: Vec2::ZERO, last_work_area: [0.0; 2], last_pixels_per_point: 0.0,
                 need_anchor: false, applied_locked: None, applied_top: None, applied_theme: None,
                 smoothed: HashMap::new(), startup_status: Some(StartupStatus { enabled: false, elevated: false }),
@@ -1053,6 +1090,86 @@ pub mod gallery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Exercise egui's real click/drag recognizer without launching Explorer.
+    fn disk_gesture(gauge: &Gauge, button: egui::PointerButton, start: Pos2, moves: &[Pos2]) -> Option<String> {
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::splat(128.0));
+        let mut time = 0.0;
+        let mut frame = |events| {
+            time += 0.016;
+            let mut target = None;
+            let _ = ctx.run_ui(egui::RawInput { time: Some(time), screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(300.0))), events, ..Default::default() }, |ui| {
+                let response = ui.allocate_rect(rect, Sense::click_and_drag());
+                target = clicked_disk(gauge, &response, rect).map(str::to_owned);
+            });
+            target
+        };
+        frame(vec![]);
+        frame(vec![egui::Event::PointerMoved(start)]);
+        assert!(frame(vec![egui::Event::PointerButton { pos: start, button, pressed: true, modifiers: Default::default() }]).is_none());
+        for &pos in moves { assert!(frame(vec![egui::Event::PointerMoved(pos)]).is_none()); }
+        let end = moves.last().copied().unwrap_or(start);
+        frame(vec![egui::Event::PointerButton { pos: end, button, pressed: false, modifiers: Default::default() }])
+    }
+
+    #[test]
+    fn disk_click_opens_its_own_root_in_both_modes_but_never_on_drag_or_other_buttons() {
+        let center = Pos2::new(84.0, 84.0);
+        let palette = Palette::new(Theme::Neon);
+        for mode in [DiskMode::Volume, DiskMode::Speed] {
+            for (mount, root) in [("C:", "C:\\"), ("D:", "D:\\"), ("C:\\", "C:\\"), ("D:\\", "D:\\")] {
+                let gauge = disk_gauge(&DiskMetric { mount: mount.into(), ..Default::default() }, mode, 1000.0, palette);
+                assert_eq!(disk_gesture(&gauge, egui::PointerButton::Primary, center, &[]).as_deref(), Some(root));
+                for button in [egui::PointerButton::Secondary, egui::PointerButton::Middle] {
+                    assert!(disk_gesture(&gauge, button, center, &[]).is_none());
+                }
+                assert!(disk_gesture(&gauge, egui::PointerButton::Primary, Pos2::new(23.0, 23.0), &[]).is_none());
+                // Moving away and returning still counts as a drag, not a click.
+                assert!(disk_gesture(&gauge, egui::PointerButton::Primary, center, &[center + Vec2::new(35.0, 0.0), center]).is_none());
+            }
+        }
+        for mount in ["", "C:folder", "C:\\folder", "C:/", "\\\\server\\share", "cmd.exe", "C:\\\0ignored", "1:", "Я:"] {
+            let gauge = disk_gauge(&DiskMetric { mount: mount.into(), ..Default::default() }, DiskMode::Volume, 1000.0, palette);
+            assert!(disk_gesture(&gauge, egui::PointerButton::Primary, center, &[]).is_none(), "{mount:?}");
+        }
+        assert!(disk_gesture(&ram_gauge(&Metrics::default(), palette), egui::PointerButton::Primary, center, &[]).is_none());
+    }
+
+    #[cfg(not(feature = "gallery"))]
+    #[test]
+    #[ignore = "opens a real drive in Explorer; run explicitly in a native Windows session"]
+    fn live_disk_click_dispatches_a_real_collector_drive_to_explorer() {
+        let (rx, _commands) = crate::metrics::start_monitor();
+        let until = Instant::now() + Duration::from_secs(10);
+        let metrics = loop {
+            let sample = rx.recv_timeout(until.saturating_duration_since(Instant::now())).expect("live collector snapshot");
+            if !sample.disks.is_empty() { break sample; }
+            assert!(Instant::now() < until, "collector returned no disks");
+        };
+        let disk = metrics.disks.iter().find(|disk| disk.mount == "D:").unwrap_or(&metrics.disks[0]);
+        assert_eq!(disk.mount.len(), 2, "test must use the collector's actual drive-label format");
+        let gauge = disk_gauge(disk, DiskMode::Speed, 1000.0, Palette::new(Theme::Light));
+        assert_eq!(gauge.disk_mount.as_deref(), Some(format!("{}\\", disk.mount).as_str()));
+        let (_tx, empty_rx) = mpsc::channel();
+        let (commands, _command_rx) = mpsc::channel();
+        let mut app = WidgetApp::new(Config::default(), empty_rx, commands, Arc::new(UiSignals::default()));
+        let ctx = egui::Context::default();
+        let center = Pos2::new(84.0, 84.0);
+        let rect = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::splat(128.0));
+        for (index, events) in [vec![], vec![egui::Event::PointerMoved(center)],
+            vec![egui::Event::PointerButton { pos: center, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+            vec![egui::Event::PointerButton { pos: center, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }],
+        ].into_iter().enumerate() {
+            let _ = ctx.run_ui(egui::RawInput { time: Some(index as f64 * 0.016), screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(300.0))), events, ..Default::default() }, |ui| {
+                app.draw_gauge(ui, rect, &gauge, Palette::new(Theme::Light), Instant::now());
+            });
+        }
+        let result = app.disk_open_rx.take().expect("real draw_gauge must dispatch the disk click")
+            .recv_timeout(Duration::from_secs(15)).expect("shell worker must complete");
+        assert_eq!(result, Ok(()));
+        println!("LIVE_DISK_CLICK_OK: collector={} explorer={}", disk.mount, gauge.disk_mount.as_deref().unwrap());
+    }
 
     #[test]
     fn ring_transition_starts_without_an_idle_frame_jump_and_finishes_exactly() {
@@ -1154,7 +1271,7 @@ mod tests {
     #[test]
     fn stale_gpu_header_tooltip_and_ram_footer_do_not_keep_numeric_samples() {
         let p = Palette::new(Theme::Neon);
-        let mut gpu = Gauge { id: "gpu".into(), label: "ГП 66°".into(), main: "54%".into(),
+        let mut gpu = Gauge { id: "gpu".into(), disk_mount: None, label: "ГП 66°".into(), main: "54%".into(),
             detail: "3,4 / 12 ГБ".into(), footer: None, outer: Some(0.54), inner: Some(0.66),
             accent: p.green, secondary: p.orange, tooltip: "ГП: 54%, температура 66 °C".into() };
         clear_stale_gauge(&mut gpu);

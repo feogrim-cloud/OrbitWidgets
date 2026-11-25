@@ -1,4 +1,16 @@
-# Orbit Widgets v1.1.10
+# Orbit Widgets v1.1.12
+
+## 1.1.12 — Drive click fix / Исправление клика по диску
+
+**English:** drive labels from live Windows readings, such as `C:`, now resolve to the absolute root `C:\` before Explorer opens. This fixes clicks in both Capacity and Speed mode. Existing drive identifiers, hidden-drive choices and saved settings are preserved.
+
+**Русский:** обозначения томов из реальных показаний Windows, например `C:`, теперь преобразуются в абсолютный корень `C:\` перед открытием Проводника. Исправлены клики в режимах «Объём» и «Скорость». Идентификаторы дисков, выбор скрытых дисков и сохранённые настройки не меняются.
+
+## 1.1.11 — Open drives from circles / Открытие дисков из кругов
+
+**English:** single left-click a drive circle to open its root in Windows Explorer in either Capacity or Speed mode. Dragging still moves the widget group, and right-click still opens Settings. In click-through mode, first unlock the widgets from the notification-area icon menu.
+
+**Русский:** один левый клик по кругу диска открывает его корень в Проводнике в режимах «Объём» и «Скорость». Перетаскивание по-прежнему перемещает всю группу, правый клик открывает настройки. При включённом пропуске кликов сначала разблокируйте виджеты через меню значка в области уведомлений.
 
 ## 1.1.10 — One-second readings / Показания раз в секунду
 

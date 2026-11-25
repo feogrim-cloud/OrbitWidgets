@@ -21,6 +21,7 @@ mod startup {
 }
 
 mod platform {
+    pub fn open_disk(_mount: &str) -> Result<(), String> { Err("Недоступно в режиме иллюстраций".into()) }
     pub fn prepare_taskbar_windows() {}
     pub fn monitor_names() -> Vec<String> { vec!["Экран 1 · DISPLAY1".into(), "Экран 2 · DISPLAY2".into()] }
     pub fn work_area_size(_index: usize) -> [f32; 2] { [1920.0, 1040.0] }

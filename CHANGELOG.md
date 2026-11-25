@@ -1,5 +1,29 @@
 # Changelog / Изменения
 
+## 1.1.12 — 2026-11-25
+
+### English
+
+- Fixed drive clicks with live Windows readings: drive labels such as `C:` now resolve to the absolute root `C:\` before opening Explorer, in both Capacity and Speed mode.
+- Existing drive identifiers, hidden-drive choices and saved settings are preserved.
+
+### Русский
+
+- Исправлено открытие дисков по реальным показаниям Windows: обозначение тома `C:` теперь преобразуется в абсолютный корень `C:\` перед открытием Проводника в режимах «Объём» и «Скорость».
+- Идентификаторы дисков, выбор скрытых дисков и сохранённые настройки не меняются.
+
+## 1.1.11 — 2026-11-25
+
+### English
+
+- Added opening a drive root in Windows Explorer with a single left-click on its circle, in both Capacity and Speed mode. Dragging still moves the widget group, and right-click still opens Settings.
+- In click-through mode, unlock the widgets from the notification-area icon menu before clicking a drive circle.
+
+### Русский
+
+- Один левый клик по кругу диска открывает его корень в Проводнике в режимах «Объём» и «Скорость». Перетаскивание по-прежнему перемещает всю группу, правый клик открывает настройки.
+- При включённом пропуске кликов сначала разблокируйте виджеты через меню значка в области уведомлений.
+
 ## 1.1.10 — 2026-10-27
 
 ### English

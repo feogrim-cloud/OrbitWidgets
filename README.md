@@ -69,6 +69,8 @@ A new profile places the widgets vertically at the **right-center of a secondary
 3. Drag a circle to move the group freely, or select an anchor in Settings.
 4. Enable **Поверх других окон** (Always on top) if you want the widgets visible over ordinary windows on that monitor.
 
+Single left-click a drive circle to open its root in Windows Explorer, in either Capacity or Speed mode. Dragging still moves the widget group. In click-through mode, first unlock the widgets from the notification-area icon menu.
+
 | Action | Control |
 | --- | --- |
 | Open Settings and allow interaction | `Ctrl` + `Alt` + `O` |
